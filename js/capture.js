@@ -29,6 +29,8 @@
 		return Math.min(s, maxTexture() / Math.max(W, H));
 	}
 
+	window.getCaptureScale = captureScale;
+
 	function updateInfo() {
 		const s = captureScale();
 		const w = Math.floor(g.width * s),

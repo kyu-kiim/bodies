@@ -17,6 +17,10 @@ const opt = (() => {
 		boids: 5000,
 
 		murmur: true,
+		trails: true,
+		trailInk: 0.12,
+		trailFade: 0.006,
+		hideLive: false,
 		toggle: false,
 		desired: false,
 		hideBoids: false,
@@ -50,6 +54,10 @@ const opt = (() => {
 		boids: "c",
 
 		murmur: "z",
+		trails: "A",
+		trailInk: "B",
+		trailFade: "C",
+		hideLive: "D",
 		toggle: "d",
 		desired: "e",
 		hideBoids: "x",
@@ -179,6 +187,11 @@ const opt = (() => {
 	const methods = {
 		restart() {
 			flock.reset();
+			trails.clear();
+		},
+
+		clearTrails() {
+			trails.clear();
 		},
 
 		reset() {

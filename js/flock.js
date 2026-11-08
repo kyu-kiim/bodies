@@ -88,7 +88,7 @@ class Flock {
 				}
 			}
 
-			app.stage.addChild(shape);
+			if (!shape.parent) app.stage.addChildAt(shape, 1);
 		}
 
 		this.buckets.fill(undefined);

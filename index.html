@@ -87,6 +87,61 @@
 				<input type="checkbox" id="murmur" data-model="murmur" />
 				<label for="murmur"> murmuration style (ink on paper)</label>
 			</div>
+			<h4>paths</h4>
+
+			<div>
+				<input type="checkbox" id="tracePaths" data-model="trails" />
+				<label for="tracePaths">
+					trace paths (long exposure)
+					<span class="tooltip">
+						?
+						<span class="tip">
+							every frame each boid leaves a faint mark, so the
+							picture builds up the routes the flock has travelled
+							instead of a single instant.
+						</span>
+					</span>
+				</label>
+			</div>
+			<div>
+				<input type="checkbox" id="hideLive" data-model="hideLive" />
+				<label for="hideLive"> show only the paths</label>
+			</div>
+
+			<p>path ink <span data-show="trailInk"></span></p>
+			<input
+				type="range"
+				min="0.02"
+				max="0.6"
+				step="0.01"
+				data-model="trailInk"
+				data-digits="2"
+			/>
+
+			<p>
+				path fade
+				<span class="tooltip">
+					?
+					<span class="tip">
+						0 keeps every path forever; higher values let old paths
+						dissolve so the drawing keeps evolving.
+					</span>
+				</span>
+				<span data-show="trailFade"></span>
+			</p>
+			<input
+				type="range"
+				min="0"
+				max="0.05"
+				step="0.001"
+				data-model="trailFade"
+				data-digits="3"
+			/>
+
+			<button data-click="clearTrails" class="capture-btn">clear paths</button>
+
+			<h4>display</h4>
+
 			<div>
 				<input type="checkbox" id="toggle" data-model="toggle" />
 				<label for="toggle"> hide menu toggle (still works)</label>
@@ -341,6 +396,7 @@
 		<script src="./js/boid.js"></script>
 		<script src="./js/flock.js"></script>
 		<script src="./js/main.js"></script>
+		<script src="./js/trails.js"></script>
 		<script src="./js/events.js"></script>
 		<script src="./js/capture.js"></script>
 	</body>

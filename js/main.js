@@ -61,6 +61,12 @@ const app = new PIXI.Application({
 
 document.body.prepend(app.view);
 
+// stacking order: trail canvas → (grid) → live boids → overlays
+const trailSprite = new PIXI.Sprite();
+app.stage.addChild(trailSprite);
+const layer = new PIXI.Container();
+app.stage.addChild(layer);
+
 function applyTheme() {
 	const bg = opt.murmur ? PAPER : DARK_BG;
 	document.body.classList.toggle("light", opt.murmur);
@@ -85,14 +91,18 @@ function loop(delta) {
 	);
 	g.sqVis = opt.vision * opt.vision;
 
+	let advanced = false;
 	if (!opt.paused) {
 		flock.update();
+		advanced = true;
 	} else if (g.nextFrame) {
 		flock.update();
 		g.nextFrame = false;
+		advanced = true;
 	}
 
 	flock.draw();
+	if (typeof trails !== "undefined" && trails.step) trails.step(advanced);
 
 	if (g.explode === 1) {
 		app.stage.addChild(g.sprites.explode);

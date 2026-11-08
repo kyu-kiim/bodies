@@ -23,7 +23,7 @@ class Boid extends V2D {
 		this.desired.endFill();
 		this.desired.alpha = 0;
 
-		app.stage.addChild(this.shape);
+		layer.addChild(this.shape);
 		app.stage.addChild(this.desired);
 	}
 
