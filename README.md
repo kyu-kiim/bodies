@@ -1,4 +1,7 @@
-# Boids Simulation
+# bodies
+for graduation
+
+## Boids Simulation
 
 PixiJS 기반 2D 군집(flocking) 시뮬레이션. 원작: [cubeDhuang/boids](https://github.com/cubeDhuang/boids)
 
