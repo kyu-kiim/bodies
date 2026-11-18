@@ -27,7 +27,9 @@ const opt = (() => {
 		imgHold: 4,
 		imgFree: 5,
 		imgBurst: true,
-		imgColor: false,
+		imgTiles: true,
+		imgDropBg: false,
+		imgFly: 0.6,
 		imgInvert: false,
 		imgContrast: 1.5,
 		trails: true,
@@ -76,7 +78,9 @@ const opt = (() => {
 		imgHold: "G",
 		imgFree: "H",
 		imgBurst: "I",
-		imgColor: "J",
+		imgTiles: "J",
+		imgDropBg: "Q",
+		imgFly: "R",
 		imgInvert: "K",
 		imgContrast: "L",
 		trails: "A",
@@ -134,7 +138,9 @@ const opt = (() => {
 				model === "hideBoids" ||
 				model === "areas" ||
 				model === "outlines" ||
-				model === "halfAreas"
+				model === "halfAreas" ||
+				model === "imgTiles" ||
+				model === "imgOn"
 			) {
 				g.shapeMode++;
 			}

@@ -194,7 +194,7 @@ class Boid extends V2D {
 		if (opt.drag) this.vel.mult(1 - opt.drag);
 
 		const f = this.formWeight();
-		if (opt.noise) this.vel.rotate(random(-g.noiseRange, g.noiseRange) * (1 - f * 0.9));
+		if (opt.noise) this.vel.rotate(random(-g.noiseRange, g.noiseRange) * (1 - f));
 
 		const minSpeed = opt.minSpeed * (1 - f);
 		if (minSpeed > 0.001) {
@@ -205,6 +205,22 @@ class Boid extends V2D {
 
 		this.vel.max(opt.maxSpeed * (1 + f * 0.6));
 		this.sclAdd(this.vel, g.delta);
+
+		// almost formed: ease onto the exact spot so the pieces lock together
+		if (f > 0.55) {
+			const tg = images.target(this.index);
+			if (tg) {
+				const k = Math.min(1, ((f - 0.55) / 0.45) ** 2 * 0.35 * g.delta);
+				this.x += (tg[0] - this.x) * k;
+				this.y += (tg[1] - this.y) * k;
+				if (f >= 0.999) {
+					// fully formed: sit exactly on the spot
+					this.x = tg[0];
+					this.y = tg[1];
+					this.vel.mult(0.2);
+				}
+			}
+		}
 
 		if (opt.bounce) {
 			let ran = false;
@@ -232,7 +248,9 @@ class Boid extends V2D {
 		this.shape.y = this.y;
 		this.shape.rotation = this.vel.angle();
 
-		if (opt.hues && !(opt.imgColor && images.color(this.index) !== null))
+		this.showTile();
+
+		if (opt.hues)
 			this.shape.tint = hsv(
 				constrain(this.vel.mag() / (opt.maxSpeed * 2), 0, 1),
 				1,
@@ -251,11 +269,44 @@ class Boid extends V2D {
 		} else this.desired.alpha = 0;
 	}
 
+	showTile() {
+		const tex = images.tile(this.index);
+		if (!tex) {
+			if (this.tile) this.tile.visible = false;
+			this.shape.visible = true;
+			return;
+		}
+		if (!this.tile) {
+			this.tile = new PIXI.Sprite(tex);
+			this.tile.anchor.set(0.5);
+			layer.addChild(this.tile);
+		}
+		if (this.tile.texture !== tex) this.tile.texture = tex;
+		this.shape.visible = false;
+
+		const f = this.formWeight();
+		const pose = images.tilePose();
+		// in flight the piece shrinks and turns with its heading;
+		// formed, it locks into place, a hair larger to hide the seams
+		const k = pose.scale * (opt.imgFly * (1 - f) + 1.03 * f);
+		this.tile.visible = true;
+		this.tile.x = this.x;
+		this.tile.y = this.y;
+		this.tile.rotation = this.vel.angle() * (1 - f) + pose.rot * f;
+		this.tile.scale.set(k * (pose.sx * f + (1 - f)), k * (pose.sy * f + (1 - f)));
+		this.tile.alpha = 1;
+	}
+
 	getShape() {
 		if (this.shapeMode !== g.shapeMode) {
 			this.shape.clear();
 
 			const k = opt.murmur ? this.sizeVar : 1;
+			// carrying a piece of the image: the sprite is drawn instead
+			if (images.tile(this.index)) {
+				this.shapeMode = g.shapeMode;
+				return this.shape;
+			}
 
 			if (!opt.hideBoids && opt.murmur) {
 				// tiny wedge-shaped speck, like a distant starling
@@ -299,6 +350,7 @@ class Boid extends V2D {
 	}
 
 	destroy() {
+		if (this.tile) this.tile.destroy();
 		this.shape.destroy();
 		this.desired.destroy();
 	}

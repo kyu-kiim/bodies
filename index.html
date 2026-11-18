@@ -188,9 +188,28 @@
 				<label for="imgBurst"> burst when scattering</label>
 			</div>
 			<div>
-				<input type="checkbox" id="imgColor" data-model="imgColor" />
-				<label for="imgColor"> use image colours</label>
+				<input type="checkbox" id="imgTiles" data-model="imgTiles" />
+				<label for="imgTiles">
+					cut the image into pieces
+					<span class="tooltip">
+						?
+						<span class="tip">
+							on: the image itself is cut into a grid of pieces,
+							one per boid; gathered, they lock back together into
+							the original picture. off: ink dots that trace the
+							image's shading.
+						</span>
+					</span>
+				</label>
 			</div>
+			<div>
+				<input type="checkbox" id="imgDropBg" data-model="imgDropBg" />
+				<label for="imgDropBg"> leave out a plain background</label>
+			</div>
+
+			<p>piece size in flight <span data-show="imgFly"></span></p>
+			<input type="range" min="0.1" max="1.2" step="0.05" data-model="imgFly" data-digits="2" />
+
 			<div>
 				<input type="checkbox" id="imgInvert" data-model="imgInvert" />
 				<label for="imgInvert"> invert tones</label>
