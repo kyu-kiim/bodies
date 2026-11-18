@@ -132,6 +132,8 @@ class Boid extends V2D {
 
 		this.seek();
 
+		for (const h of g.hands) this.hand(h);
+
 		if (g.mouse.down && g.mouse.over) {
 			const mv = new V2D(g.mouse.x, g.mouse.y);
 
@@ -158,6 +160,31 @@ class Boid extends V2D {
 				.max(g.mouseForce * 3);
 
 			this.acc.sub(ev);
+		}
+	}
+
+	hand(h) {
+		// fist with an image loaded is used to form the image instead
+		if (h.gesture === "pinch") return;
+		if (h.gesture === "fist" && opt.handForm && g.form > 0) return;
+
+		const dx = h.x - this.x,
+			dy = h.y - this.y;
+		const d2 = dx * dx + dy * dy || 1;
+		const d = Math.sqrt(d2);
+		const power = opt.handPower;
+
+		// the same falloff as the mouse, but reaching further
+		let m = Math.min((25000 * power) / d2, g.mouseForce * 1.5 * power);
+		const sign = h.gesture === "fist" ? -1 : 1;
+		this.acc.x += (dx / d) * m * sign;
+		this.acc.y += (dy / d) * m * sign;
+
+		// an open hand also drags nearby boids along with its sweep
+		if (h.gesture === "open") {
+			const near = Math.max(0, 1 - d / 220);
+			this.acc.x += h.vx * 0.08 * near * power;
+			this.acc.y += h.vy * 0.08 * near * power;
 		}
 	}
 

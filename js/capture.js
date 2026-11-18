@@ -92,8 +92,10 @@
 				});
 				const explodeVisible = g.sprites.explode.visible;
 				g.sprites.explode.visible = false;
+				hands.overlay.visible = false;
 				app.renderer.render(app.stage, { renderTexture: rt, clear: true });
 				g.sprites.explode.visible = explodeVisible;
+				hands.overlay.visible = true;
 
 				const src = app.renderer.plugins.extract.canvas(rt);
 				rt.destroy(true);

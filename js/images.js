@@ -226,12 +226,19 @@ const images = (() => {
 			g.form = 0;
 			return;
 		}
-		if (opt.imgCycle) {
+		const byHand = opt.handForm && typeof hands !== "undefined" && hands.active;
+		if (byHand) {
+			const fist = g.hands.some(h => h.gesture === "fist");
+			g.form += ((fist ? 1 : 0) - g.form) * Math.min(1, dtSec * 1.6);
+			if (g.form < 0.002) g.form = 0;
+		} else if (opt.imgCycle) {
 			if (running) g.form = advance(dtSec);
 		} else g.form = opt.imgForm;
 
 		const pct = Math.round(g.form * 100);
-		select("#imgStatus").textContent = opt.imgCycle
+		select("#imgStatus").textContent = byHand
+			? `hand control · ${pct}%`
+			: opt.imgCycle
 			? `${["gathering", "holding", "scattering", "flocking"][phase]} · ${pct}%`
 			: `form ${pct}%`;
 	}

@@ -40,6 +40,7 @@ const g = {
 
 	delta: 1,
 	form: 0,
+	hands: [],
 	shapeMode: 1,
 
 	bias: parseFloat(opt.rbias),
@@ -109,6 +110,7 @@ function loop(delta) {
 
 	flock.draw();
 	trails.step(advanced);
+	hands.draw();
 
 	if (g.explode === 1) {
 		app.stage.addChild(g.sprites.explode);

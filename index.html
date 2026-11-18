@@ -87,6 +87,32 @@
 				<input type="checkbox" id="murmur" data-model="murmur" />
 				<label for="murmur"> murmuration style (ink on paper)</label>
 			</div>
+			<h4>hand control</h4>
+
+			<p class="capture-info">
+				webcam + MediaPipe. <key>open hand</key> pulls the flock and
+				sweeps it along, <key>fist</key> pushes it away (or gathers the
+				image when one is loaded), <key>pinch</key> makes a burst.
+			</p>
+			<button id="handStart" class="capture-btn">start camera</button>
+			<p class="capture-info" id="handStatus">camera off</p>
+
+			<div>
+				<input type="checkbox" id="handShow" data-model="handShow" />
+				<label for="handShow"> draw hand on screen</label>
+			</div>
+			<div>
+				<input type="checkbox" id="handCam" data-model="handCam" />
+				<label for="handCam"> show camera preview</label>
+			</div>
+			<div>
+				<input type="checkbox" id="handForm" data-model="handForm" />
+				<label for="handForm"> fist forms the image</label>
+			</div>
+
+			<p>hand strength <span data-show="handPower"></span></p>
+			<input type="range" min="0.2" max="3" step="0.1" data-model="handPower" data-digits="1" />
+
 			<h4>image</h4>
 
 			<input type="file" id="imgFile" accept="image/*" hidden />
@@ -450,6 +476,8 @@
 			</div>
 		</div>
 
+		<video id="handVideo" playsinline muted></video>
+
 		<div id="dropHint">drop the image to break it into particles</div>
 
 		<div class="popupwindow" id="popupwindow">
@@ -483,6 +511,7 @@
 		<script src="./js/main.js"></script>
 		<script src="./js/images.js"></script>
 		<script src="./js/trails.js"></script>
+		<script src="./js/hands.js"></script>
 		<script src="./js/events.js"></script>
 		<script src="./js/capture.js"></script>
 	</body>

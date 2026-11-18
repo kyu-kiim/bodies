@@ -17,6 +17,10 @@ const opt = (() => {
 		boids: 5000,
 
 		murmur: true,
+		handShow: true,
+		handCam: true,
+		handForm: true,
+		handPower: 0.6,
 		imgOn: true,
 		imgCycle: true,
 		imgForm: 1,
@@ -63,6 +67,10 @@ const opt = (() => {
 		boids: "c",
 
 		murmur: "z",
+		handShow: "M",
+		handCam: "N",
+		handForm: "O",
+		handPower: "P",
 		imgCycle: "E",
 		imgForm: "F",
 		imgHold: "G",
@@ -120,6 +128,8 @@ const opt = (() => {
 			if (model === "toggle")
 				select("#toggler img").classList.toggle("gone", el.checked);
 			else if (model === "murmur") applyTheme();
+			else if (model === "handCam")
+				document.body.classList.toggle("hide-cam", !el.checked);
 			else if (
 				model === "hideBoids" ||
 				model === "areas" ||
@@ -171,6 +181,8 @@ const opt = (() => {
 			el.checked = data[model];
 			if (model === "toggle")
 				select("#toggler img").classList.toggle("gone", el.checked);
+			if (model === "handCam")
+				document.body.classList.toggle("hide-cam", !el.checked);
 		}
 		for (const el of sliders) {
 			const model = el.dataset.model;

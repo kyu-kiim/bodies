@@ -782,3 +782,29 @@ body.light .close-ish {
 body.dragging #dropHint {
 	opacity: 1;
 }
+
+/* hand control */
+
+#handVideo {
+	position: fixed;
+	left: 16px;
+	bottom: 16px;
+	width: 200px;
+	border-radius: 12px;
+	transform: scaleX(-1);
+	opacity: 0;
+	pointer-events: none;
+	border: 2px solid var(--panel-border);
+	transition: opacity 0.3s;
+	z-index: 3;
+}
+body.hand-on #handVideo {
+	opacity: 0.85;
+}
+body.hand-on.hide-cam #handVideo {
+	opacity: 0;
+}
+#handStart:disabled {
+	opacity: 0.5;
+	cursor: wait;
+}
