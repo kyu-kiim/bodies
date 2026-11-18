@@ -87,6 +87,89 @@
 				<input type="checkbox" id="murmur" data-model="murmur" />
 				<label for="murmur"> murmuration style (ink on paper)</label>
 			</div>
+			<h4>image</h4>
+
+			<input type="file" id="imgFile" accept="image/*" hidden />
+			<div class="img-row">
+				<img id="imgThumb" alt="" />
+				<div class="img-meta">
+					<span id="imgName">no image</span>
+					<span class="capture-info">drop, paste or pick an image</span>
+				</div>
+			</div>
+			<div class="resetters">
+				<button id="imgPick">choose image</button>
+				<button id="imgClear" class="close-ish">remove</button>
+			</div>
+
+			<div>
+				<input type="checkbox" id="imgOn" data-model="imgOn" />
+				<label for="imgOn"> form the image</label>
+			</div>
+			<div>
+				<input type="checkbox" id="imgCycle" data-model="imgCycle" />
+				<label for="imgCycle">
+					auto cycle
+					<span class="tooltip">
+						?
+						<span class="tip">
+							gather into the image, hold, scatter back into a
+							flock, then re-form as a new variation (turned,
+							waved, swirled, shattered, mirrored…).
+						</span>
+					</span>
+				</label>
+			</div>
+			<p class="capture-info">
+				<span id="imgStatus"></span> · shape <b id="imgVariant">—</b>
+			</p>
+			<button id="imgNext" class="capture-btn">next shape</button>
+
+			<p>
+				form (manual)
+				<span class="tooltip">
+					?
+					<span class="tip">
+						used when auto cycle is off: 0 = free flock, 1 = fully
+						formed image.
+					</span>
+				</span>
+				<span data-show="imgForm"></span>
+			</p>
+			<input type="range" min="0" max="1" step="0.01" data-model="imgForm" data-digits="2" />
+
+			<p>hold seconds <span data-show="imgHold"></span></p>
+			<input type="range" min="0" max="20" step="0.5" data-model="imgHold" data-digits="1" />
+
+			<p>scatter seconds <span data-show="imgFree"></span></p>
+			<input type="range" min="0.5" max="20" step="0.5" data-model="imgFree" data-digits="1" />
+
+			<p>
+				tone contrast
+				<span class="tooltip">
+					?
+					<span class="tip">
+						higher values push more points into the darkest areas,
+						giving a crisper stippled picture.
+					</span>
+				</span>
+				<span data-show="imgContrast"></span>
+			</p>
+			<input type="range" min="0.5" max="4" step="0.1" data-model="imgContrast" data-digits="1" />
+
+			<div>
+				<input type="checkbox" id="imgBurst" data-model="imgBurst" />
+				<label for="imgBurst"> burst when scattering</label>
+			</div>
+			<div>
+				<input type="checkbox" id="imgColor" data-model="imgColor" />
+				<label for="imgColor"> use image colours</label>
+			</div>
+			<div>
+				<input type="checkbox" id="imgInvert" data-model="imgInvert" />
+				<label for="imgInvert"> invert tones</label>
+			</div>
+
 			<h4>paths</h4>
 
 			<div>
@@ -367,6 +450,8 @@
 			</div>
 		</div>
 
+		<div id="dropHint">drop the image to break it into particles</div>
+
 		<div class="popupwindow" id="popupwindow">
 			<div class="popup" id="export-popup">
 				<h2>export settings</h2>
@@ -396,6 +481,7 @@
 		<script src="./js/boid.js"></script>
 		<script src="./js/flock.js"></script>
 		<script src="./js/main.js"></script>
+		<script src="./js/images.js"></script>
 		<script src="./js/trails.js"></script>
 		<script src="./js/events.js"></script>
 		<script src="./js/capture.js"></script>

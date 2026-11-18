@@ -10,6 +10,8 @@ class Boid extends V2D {
 		// per-bird variation gives the "ink speckle" depth of a murmuration
 		this.sizeVar = 0.55 + Math.random() * 0.8;
 		this.alphaVar = 0.55 + Math.random() * 0.45;
+		// stagger so the picture assembles like a wave, not all at once
+		this.lag = Math.random();
 
 		this.shape = new PIXI.Graphics();
 		this.shapeMode = null;
@@ -93,15 +95,42 @@ class Boid extends V2D {
 			sep.setMag(opt.maxSpeed).sub(this.vel).max(opt.maxForce);
 		}
 
-		this.acc.sclAdd(aln, opt.alignment);
-		this.acc.sclAdd(csn, opt.cohesion);
-		this.acc.sclAdd(sep, opt.separation);
+		const free = 1 - this.formWeight();
+		this.acc.sclAdd(aln, opt.alignment * free);
+		this.acc.sclAdd(csn, opt.cohesion * free);
+		this.acc.sclAdd(sep, opt.separation * free);
+	}
+
+	formWeight() {
+		if (!g.form) return 0;
+		return constrain((g.form - this.lag * 0.35) / 0.65, 0, 1);
+	}
+
+	seek() {
+		const f = this.formWeight();
+		if (f <= 0) return;
+		const tg = images.target(this.index);
+		if (!tg) return;
+		const dx = tg[0] - this.x,
+			dy = tg[1] - this.y;
+		const d = Math.hypot(dx, dy) || 1;
+		// arrive: full speed far away, slowing to a stop on its point
+		const speed = Math.min(opt.maxSpeed * 1.6, d * 0.06);
+		const sx = (dx / d) * speed - this.vel.x,
+			sy = (dy / d) * speed - this.vel.y;
+		const lim = 0.25 + opt.maxForce * 2;
+		const m = Math.hypot(sx, sy);
+		const k = m > lim ? lim / m : 1;
+		this.acc.x += sx * k * f * 2;
+		this.acc.y += sy * k * f * 2;
 	}
 
 	interact() {
 		if (opt.particle || opt.vision === 0) {
 			this.acc.zero();
 		}
+
+		this.seek();
 
 		if (g.mouse.down && g.mouse.over) {
 			const mv = new V2D(g.mouse.x, g.mouse.y);
@@ -137,14 +166,17 @@ class Boid extends V2D {
 
 		if (opt.drag) this.vel.mult(1 - opt.drag);
 
-		if (opt.noise) this.vel.rotate(random(-g.noiseRange, g.noiseRange));
+		const f = this.formWeight();
+		if (opt.noise) this.vel.rotate(random(-g.noiseRange, g.noiseRange) * (1 - f * 0.9));
 
-		if (opt.minSpeed) {
-			if (this.vel.sqrMag() === 0) this.vel.random(opt.minSpeed);
-			else this.vel.min(opt.minSpeed);
+		const minSpeed = opt.minSpeed * (1 - f);
+		if (minSpeed > 0.001) {
+			if (this.vel.sqrMag() === 0) this.vel.random(minSpeed);
+			else this.vel.min(minSpeed);
 		}
+		if (f > 0) this.vel.mult(1 - 0.06 * f); // settle on the point
 
-		this.vel.max(opt.maxSpeed);
+		this.vel.max(opt.maxSpeed * (1 + f * 0.6));
 		this.sclAdd(this.vel, g.delta);
 
 		if (opt.bounce) {
@@ -173,13 +205,16 @@ class Boid extends V2D {
 		this.shape.y = this.y;
 		this.shape.rotation = this.vel.angle();
 
-		if (opt.hues)
+		if (opt.hues && !(opt.imgColor && images.color(this.index) !== null))
 			this.shape.tint = hsv(
 				constrain(this.vel.mag() / (opt.maxSpeed * 2), 0, 1),
 				1,
 				1
 			);
-		else this.shape.tint = opt.murmur ? INK : 0xffffff;
+		else {
+			const c = images.color(this.index);
+			this.shape.tint = c !== null ? c : opt.murmur ? INK : 0xffffff;
+		}
 
 		if (opt.desired && this.acc.sqrMag() > 0.01) {
 			this.desired.alpha = 0.5;

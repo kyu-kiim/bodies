@@ -724,3 +724,61 @@ body.light ::-webkit-scrollbar-thumb {
 body.light #container {
 	scrollbar-color: #0003 #0000;
 }
+
+/* image */
+
+.img-row {
+	display: flex;
+	gap: 12px;
+	align-items: center;
+	margin-top: 8px;
+}
+#imgThumb {
+	width: 56px;
+	height: 56px;
+	object-fit: cover;
+	border-radius: 8px;
+	background: var(--ctl-bg);
+	border: 1px solid var(--panel-border);
+}
+#imgThumb:not([src]) {
+	visibility: hidden;
+	width: 0;
+	border: none;
+}
+.img-meta {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+#imgName {
+	font-weight: 600;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.close-ish {
+	--base: var(--color-red-400);
+}
+body.light .close-ish {
+	--base: var(--color-red-700);
+}
+
+#dropHint {
+	position: fixed;
+	inset: 16px;
+	border: 2px dashed currentColor;
+	border-radius: 20px;
+	display: grid;
+	place-items: center;
+	font-size: 1.4em;
+	color: var(--fg);
+	background: #8881;
+	pointer-events: none;
+	opacity: 0;
+	transition: opacity 0.2s;
+	z-index: 5;
+}
+body.dragging #dropHint {
+	opacity: 1;
+}

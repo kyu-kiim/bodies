@@ -39,6 +39,7 @@ const g = {
 	},
 
 	delta: 1,
+	form: 0,
 	shapeMode: 1,
 
 	bias: parseFloat(opt.rbias),
@@ -92,6 +93,11 @@ function loop(delta) {
 	g.sqVis = opt.vision * opt.vision;
 
 	let advanced = false;
+	images.update(
+		Math.min(app.ticker.deltaMS, 50) / 1000,
+		!opt.paused || g.nextFrame
+	);
+
 	if (!opt.paused) {
 		flock.update();
 		advanced = true;
@@ -102,7 +108,7 @@ function loop(delta) {
 	}
 
 	flock.draw();
-	if (typeof trails !== "undefined" && trails.step) trails.step(advanced);
+	trails.step(advanced);
 
 	if (g.explode === 1) {
 		app.stage.addChild(g.sprites.explode);
@@ -129,4 +135,8 @@ function loop(delta) {
 	app.render();
 }
 
-app.ticker.add(loop);
+// start only once every script (images, trails, capture…) has loaded;
+// a frame can otherwise fire while a later script is still downloading
+if (document.readyState === "loading")
+	document.addEventListener("DOMContentLoaded", () => app.ticker.add(loop));
+else app.ticker.add(loop);
