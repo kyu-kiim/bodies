@@ -7,6 +7,7 @@
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
   canvas { display: block; }
+  #overlay { position: fixed; inset: 0; pointer-events: none; }
   body.hide-ui .lil-gui, body.hide-ui #hint { display: none !important; }
   #hint {
     position: fixed; left: 12px; bottom: 10px;
@@ -36,6 +37,18 @@ const params = {
   scale: 1.0,        // 스프레드 크기
   light: 1.0,        // 조명 강도
   background: '#000000',
+
+  // 연속사진(머이브리지) 모드
+  mode: 'sequence',     // 'sequence' | 'single'
+  cols: 8,
+  rows: 3,
+  cellAspect: 0.78,     // 칸 가로/세로 비 (머이브리지 원판처럼 세로로 긴 칸)
+  gap: 10,              // 칸 사이 간격 (px)
+  cellBg: '#141414',    // 칸 배경색
+  framesPerCycle: 8,    // 날갯짓 한 번당 찍히는 프레임 수
+  timeScale: 0.35,      // 재생 속도 (1 = 실제 속도)
+  hold: 5,              // 다 채운 뒤 머무는 시간 (초)
+  numbers: true,        // 프레임 번호 표시
 };
 
 // ---- 렌더러 / 장면 / 카메라 ------------------------------------------
@@ -43,13 +56,21 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.autoClear = false; // 칸마다 직접 지움
 document.body.appendChild(renderer.domElement);
 
+// 프레임 번호용 2D 오버레이
+const overlay = document.createElement('canvas');
+overlay.id = 'overlay';
+document.body.appendChild(overlay);
+const octx = overlay.getContext('2d');
+
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(params.background);
 
 const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.01, 200);
-camera.position.set(3.2, 3.4, 4.6);          // 위에서 비스듬히 내려다봄
+// 옆에서 약간 위로 내려다보는 시점 — 진행 방향(−Z)이 화면 오른쪽 (머이브리지처럼)
+const DEFAULT_CAM = new THREE.Vector3(4.5, 2.7, 0.9);
+camera.position.copy(DEFAULT_CAM);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.target.set(0, 0, 0);
@@ -271,6 +292,7 @@ async function setSlot(slot, file) {
     disposeSlot(slot);
     texState[slot] = loaded;
     refreshTextures();
+    restartSequence(); // 새 스프레드가 들어오면 왼쪽 위 칸부터 다시 촬영
   } catch (err) {
     console.error('이미지를 불러오지 못했습니다:', err);
   }
@@ -291,8 +313,76 @@ addEventListener('drop', (e) => {
   if (files[1]) setSlot('back', files[1]);
 });
 
+// ---- 연속사진 (머이브리지) -------------------------------------------
+// 같은 카메라로 칸마다 다른 순간을 렌더링한다.
+// 현재 칸에서는 스프레드가 실시간으로 날갯짓하고, 촬영 간격마다 그 순간의
+// 각도가 고정되어 칸에 남고 다음 칸으로 넘어간다 (왼쪽 위 → 오른쪽 아래).
+const seq = { frames: [], timer: 0, hold: 0, done: false };
+const layout = { x0: 0, y0: 0, cw: 1, ch: 1 };
+let numbersDirty = true;
+
+function restartSequence() {
+  seq.frames.length = 0;
+  seq.timer = 0;
+  seq.hold = 0;
+  seq.done = false;
+  numbersDirty = true;
+}
+function computeLayout() {
+  const W = innerWidth, H = innerHeight;
+  const { cols: c, rows: r, gap: g, cellAspect: a } = params;
+  const m = Math.min(W, H) * 0.06;
+  const aw = W - 2 * m, ah = H - 2 * m;
+  const cw = Math.max(1, Math.min((aw - (c - 1) * g) / c, ((ah - (r - 1) * g) / r) * a));
+  const ch = cw / a;
+  const gw = c * cw + (c - 1) * g, gh = r * ch + (r - 1) * g;
+  Object.assign(layout, { x0: (W - gw) / 2, y0: (H - gh) / 2, cw, ch });
+  numbersDirty = true;
+}
+function cellRect(i) {
+  const col = i % params.cols, row = Math.floor(i / params.cols);
+  const x = layout.x0 + col * (layout.cw + params.gap);
+  const yTop = layout.y0 + row * (layout.ch + params.gap);
+  return { x, yTop, w: layout.cw, h: layout.ch };
+}
+function resizeOverlay() {
+  const dpr = Math.min(devicePixelRatio, 2);
+  overlay.width = innerWidth * dpr;
+  overlay.height = innerHeight * dpr;
+  overlay.style.width = innerWidth + 'px';
+  overlay.style.height = innerHeight + 'px';
+  octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  numbersDirty = true;
+}
+function drawNumbers() {
+  numbersDirty = false;
+  octx.clearRect(0, 0, innerWidth, innerHeight);
+  if (params.mode !== 'sequence' || !params.numbers) return;
+  const size = Math.max(9, Math.min(14, layout.cw * 0.07));
+  octx.font = `italic ${size}px Georgia, 'Times New Roman', serif`;
+  octx.fillStyle = 'rgba(255,255,255,0.45)';
+  octx.textBaseline = 'bottom';
+  for (let i = 0; i < seq.frames.length; i++) {
+    const r = cellRect(i);
+    octx.fillText(String(i + 1), r.x + size * 0.5, r.yTop + r.h - size * 0.4);
+  }
+}
+
 // ---- GUI --------------------------------------------------------------
 const gui = new GUI({ title: 'Spread Wing' });
+const fs = gui.addFolder('연속사진');
+fs.add(params, 'mode', { '연속사진 (머이브리지)': 'sequence', '단일 개체': 'single' })
+  .name('보기 모드').onChange(() => { restartSequence(); });
+fs.add(params, 'cols', 1, 16, 1).name('가로 칸 수').onChange(() => { computeLayout(); restartSequence(); });
+fs.add(params, 'rows', 1, 8, 1).name('세로 칸 수').onChange(() => { computeLayout(); restartSequence(); });
+fs.add(params, 'cellAspect', 0.4, 2, 0.01).name('칸 비율 (가로/세로)').onChange(computeLayout);
+fs.add(params, 'gap', 0, 40, 1).name('칸 간격 (px)').onChange(computeLayout);
+fs.addColor(params, 'cellBg').name('칸 배경색');
+fs.add(params, 'framesPerCycle', 2, 24, 1).name('날갯짓 1회당 프레임');
+fs.add(params, 'timeScale', 0.05, 1.5, 0.01).name('재생 속도');
+fs.add(params, 'hold', 0, 30, 0.5).name('완성 후 정지 (초)');
+fs.add(params, 'numbers').name('프레임 번호').onChange(() => { numbersDirty = true; });
+fs.add({ f: restartSequence }, 'f').name('처음부터 다시');
 const fw = gui.addFolder('날갯짓');
 fw.add(params, 'maxAngle', 0, 85, 1).name('최대 접힘 각도 (°)');
 fw.add(params, 'frequency', 0, 4, 0.01).name('날갯짓 빈도 (Hz)');
@@ -307,10 +397,10 @@ ft.add({ f() { disposeSlot('front'); disposeSlot('back'); refreshTextures(); } }
 const fv = gui.addFolder('시각 요소');
 fv.add(params, 'scale', 0.3, 3, 0.01).name('스프레드 크기').onChange(v => spread.scale.setScalar(v));
 fv.add(params, 'light', 0, 2, 0.01).name('조명 강도').onChange(applyLight);
-fv.addColor(params, 'background').name('배경색').onChange(v => scene.background.set(v));
+fv.addColor(params, 'background').name('배경색');
 fv.add(axes, 'visible').name('XYZ 축 표시 (A)').listen();
 fv.add(camera, 'fov', 10, 90, 1).name('카메라 원근감 (FOV)').onChange(() => camera.updateProjectionMatrix());
-fv.add({ reset() { camera.position.set(3.2, 3.4, 4.6); controls.target.set(0, 0, 0); } }, 'reset').name('카메라 초기화');
+fv.add({ reset() { camera.position.copy(DEFAULT_CAM); controls.target.set(0, 0, 0); } }, 'reset').name('카메라 초기화');
 
 // ---- 키 / 리사이즈 ---------------------------------------------------
 addEventListener('keydown', (e) => {
@@ -322,20 +412,75 @@ addEventListener('keydown', (e) => {
     else document.exitFullscreen?.();
   }
 });
-addEventListener('resize', () => {
-  camera.aspect = innerWidth / innerHeight;
-  camera.updateProjectionMatrix();
+function onResize() {
   renderer.setSize(innerWidth, innerHeight);
-});
+  resizeOverlay();
+  computeLayout();
+}
+addEventListener('resize', onResize);
+onResize();
 
 // ---- 루프 -------------------------------------------------------------
+const TAU = Math.PI * 2;
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
-  phase = (phase + dt * params.frequency * Math.PI * 2) % (Math.PI * 2);
-  uniforms.uAngle.value = flapAngle(phase);
+  const isSeq = params.mode === 'sequence';
+  const sdt = isSeq ? dt * params.timeScale : dt; // 시뮬레이션 시간
+  phase = (phase + sdt * params.frequency * TAU) % TAU;
+  const live = flapAngle(phase);
   controls.update();
-  renderer.render(scene, camera);
+
+  const W = innerWidth, H = innerHeight;
+  renderer.setScissorTest(false);
+  renderer.setViewport(0, 0, W, H);
+  renderer.setClearColor(params.background);
+  renderer.clear();
+
+  if (!isSeq) {
+    if (numbersDirty) drawNumbers();
+    camera.aspect = W / H;
+    camera.updateProjectionMatrix();
+    uniforms.uAngle.value = live;
+    renderer.render(scene, camera);
+    return;
+  }
+
+  // 촬영: 일정 간격마다 지금 순간의 각도를 고정해 다음 칸으로
+  const total = params.cols * params.rows;
+  if (!seq.done) {
+    const interval = 1 / (Math.max(params.frequency, 0.05) * params.framesPerCycle);
+    seq.timer += sdt;
+    while (seq.timer >= interval && seq.frames.length < total) {
+      seq.frames.push(live);
+      seq.timer -= interval;
+      numbersDirty = true;
+    }
+    if (seq.frames.length >= total) { seq.done = true; seq.hold = 0; }
+  } else {
+    seq.hold += dt;
+    if (seq.hold >= params.hold) restartSequence();
+  }
+  if (numbersDirty) drawNumbers();
+
+  camera.aspect = layout.cw / layout.ch;
+  camera.updateProjectionMatrix();
+  renderer.setScissorTest(true);
+  for (let i = 0; i < total; i++) {
+    const r = cellRect(i);
+    const y = H - r.yTop - r.h; // WebGL 뷰포트는 아래에서부터
+    renderer.setViewport(r.x, y, r.w, r.h);
+    renderer.setScissor(r.x, y, r.w, r.h);
+    renderer.setClearColor(params.cellBg);
+    renderer.clear();
+    let angle;
+    if (i < seq.frames.length) angle = seq.frames[i];
+    else if (i === seq.frames.length && !seq.done) angle = live;
+    else continue; // 아직 찍히지 않은 칸은 비워 둠
+    uniforms.uAngle.value = angle;
+    renderer.render(scene, camera);
+  }
+  renderer.setScissorTest(false);
 });
 </script>
 </body>
