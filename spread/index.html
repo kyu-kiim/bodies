@@ -22,7 +22,7 @@
 </script>
 </head>
 <body>
-<div id="hint">H: UI 숨기기 · F: 전체 화면 · 드래그: 회전 · 휠: 줌</div>
+<div id="hint">H: UI 숨기기 · A: 축 표시 · F: 전체 화면 · 드래그: 회전 · 휠: 줌</div>
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -124,6 +124,57 @@ material.onBeforeCompile = (shader) => {
 const spread = new THREE.Mesh(makeSpreadGeometry(), material);
 scene.add(spread);
 
+// ---- XYZ 축 (블렌더 스타일: X 빨강, Y 초록, Z 파랑) -------------------
+// 개체 중심(원점)을 지나는 양방향 직선. 양(+)쪽은 선명하게, 음(−)쪽은 어둡게.
+const AXIS_LEN = 6;
+const axisColors = { x: 0xff3352, y: 0x8bdc00, z: 0x2890ff };
+function makeAxes() {
+  const group = new THREE.Group();
+  const pos = [], col = [];
+  const dirs = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const c = new THREE.Color(), dim = new THREE.Color();
+  for (const k of ['x', 'y', 'z']) {
+    const [dx, dy, dz] = dirs[k];
+    c.set(axisColors[k]);
+    dim.copy(c).multiplyScalar(0.5);
+    // + 방향
+    pos.push(0, 0, 0, dx * AXIS_LEN, dy * AXIS_LEN, dz * AXIS_LEN);
+    col.push(c.r, c.g, c.b, c.r, c.g, c.b);
+    // − 방향
+    pos.push(0, 0, 0, -dx * AXIS_LEN, -dy * AXIS_LEN, -dz * AXIS_LEN);
+    col.push(dim.r, dim.g, dim.b, dim.r, dim.g, dim.b);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  const lines = new THREE.LineSegments(g, new THREE.LineBasicMaterial({
+    vertexColors: true, depthWrite: false,
+  }));
+  group.add(lines);
+
+  // 축 끝 라벨
+  const LABEL_AT = 1.9;
+  for (const k of ['x', 'y', 'z']) {
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 64;
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle = '#' + new THREE.Color(axisColors[k]).getHexString();
+    ctx.font = '600 44px -apple-system, Helvetica, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(k.toUpperCase(), 32, 34);
+    const tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthWrite: false }));
+    sp.scale.setScalar(0.22);
+    const [dx, dy, dz] = dirs[k];
+    sp.position.set(dx * LABEL_AT, dy * LABEL_AT, dz * LABEL_AT);
+    group.add(sp);
+  }
+  return group;
+}
+const axes = makeAxes();
+scene.add(axes);
+
 // ---- 날갯짓 -----------------------------------------------------------
 // 위상 φ에 대해 θ = A·(sin φ + b·sin 2φ)/norm  — 약간의 비대칭으로 생물적인 느낌
 let phase = 0;
@@ -144,6 +195,7 @@ const fv = gui.addFolder('시각 요소');
 fv.add(params, 'scale', 0.3, 3, 0.01).name('스프레드 크기').onChange(v => spread.scale.setScalar(v));
 fv.add(params, 'light', 0, 2, 0.01).name('조명 강도').onChange(applyLight);
 fv.addColor(params, 'background').name('배경색').onChange(v => scene.background.set(v));
+fv.add(axes, 'visible').name('XYZ 축 표시 (A)').listen();
 fv.add(camera, 'fov', 10, 90, 1).name('카메라 원근감 (FOV)').onChange(() => camera.updateProjectionMatrix());
 fv.add({ reset() { camera.position.set(3.2, 3.4, 4.6); controls.target.set(0, 0, 0); } }, 'reset').name('카메라 초기화');
 
@@ -151,6 +203,7 @@ fv.add({ reset() { camera.position.set(3.2, 3.4, 4.6); controls.target.set(0, 0,
 addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return;
   if (e.key === 'h' || e.key === 'H') document.body.classList.toggle('hide-ui');
+  if (e.key === 'a' || e.key === 'A') axes.visible = !axes.visible;
   if (e.key === 'f' || e.key === 'F') {
     if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
     else document.exitFullscreen?.();
