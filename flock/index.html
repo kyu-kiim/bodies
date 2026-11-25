@@ -59,7 +59,7 @@ const params = {
   maxSpeed: 4,         // 이동 속도
   drag: 0.005,
   noise: 0.5,
-  accuracyPower: 5,    // 이웃 표본 수 = 2^p (10 = 전부)
+  accuracyPower: 7,    // 이웃 표본 수 = 2^p (10 = 전부)
   bounce: false,       // 경계: false = 반대편으로 이어짐(원본 기본), true = 튕김
   space: 1.0,          // 활동 공간 크기 (1 = 카메라 화면 전체)
   spacing: 2.0,        // 개체 간격: 시뮬레이션 1px을 3D에서 얼마나 길게 그릴지 (클수록 서로 멀리 보임)
@@ -265,6 +265,12 @@ const uAmp = new Float32Array(MAX);
 const uType = new Float32Array(MAX);
 const quat = Array.from({ length: MAX }, () => new THREE.Quaternion());
 const prevRight = new Float32Array(MAX * 3);
+// 떨림 방지: 화면에 그릴 때 쓰는 부드러운 진행 방향(속도의 저역 통과) + 이전 프레임 방향
+const SV = new Float32Array(MAX * 3);
+const prevFwd = new Float32Array(MAX * 3);
+// 부드러운 노이즈: 개체마다 천천히 떠도는 회전 축 (매 프레임 새 난수 대신)
+const NW = new Float32Array(MAX * 3);
+const gauss = () => { let u = 0, v = 0; while (u === 0) u = Math.random(); v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v); };
 
 // 원본 V2D.random(mag): 임의 방향, 크기 mag (3D에서는 구면 위 균등 방향)
 function randomDir(out, o, mag) {
@@ -276,6 +282,9 @@ function resetBoid(i) {
   P[i3] = Math.random() * dims[0]; P[i3 + 1] = Math.random() * dims[1]; P[i3 + 2] = Math.random() * dims[2];
   randomDir(V, i3, params.minSpeed + Math.random() * (params.maxSpeed - params.minSpeed));
   ACC[i3] = ACC[i3 + 1] = ACC[i3 + 2] = 0;
+  SV[i3] = V[i3]; SV[i3 + 1] = V[i3 + 1]; SV[i3 + 2] = V[i3 + 2];
+  const l = Math.hypot(V[i3], V[i3 + 1], V[i3 + 2]) || 1;
+  prevFwd[i3] = V[i3] / l; prevFwd[i3 + 1] = V[i3 + 1] / l; prevFwd[i3 + 2] = V[i3 + 2] / l;
 }
 for (let i = 0; i < MAX; i++) {
   resetBoid(i);
@@ -414,13 +423,16 @@ function stepBoids(delta) {
     // noise: 진행 방향을 임의의 수직 축으로 ±noiseRange 회전 (원본 2D rotate의 3D판)
     if (params.noise) {
       const sp = Math.hypot(vx, vy, vz);
+      // 원본은 매 프레임 새 난수로 꺾어 떨림이 생김 → 개체마다 천천히 떠도는 축(OU 과정)으로 부드럽게 휘어짐
+      const th = 0.05 * delta, sg = 0.32 * Math.sqrt(delta);
+      NW[i3] += -NW[i3] * th + gauss() * sg; NW[i3 + 1] += -NW[i3 + 1] * th + gauss() * sg; NW[i3 + 2] += -NW[i3 + 2] * th + gauss() * sg;
       if (sp > 0) {
-        const a = (Math.random() * 2 - 1) * noiseRange;
-        let ux = Math.random() * 2 - 1, uy = Math.random() * 2 - 1, uz = Math.random() * 2 - 1;
+        let ux = NW[i3], uy = NW[i3 + 1], uz = NW[i3 + 2];
         const fx = vx / sp, fy = vy / sp, fz = vz / sp;
         const d = ux * fx + uy * fy + uz * fz;
         ux -= d * fx; uy -= d * fy; uz -= d * fz;
         const ul = Math.hypot(ux, uy, uz);
+        const a = Math.min(ul, 2) * noiseRange * 0.35 * delta;
         if (ul > 1e-6) {
           const c = Math.cos(a), s = Math.sin(a) * sp / ul;
           vx = vx * c + ux * s; vy = vy * c + uy * s; vz = vz * c + uz * s;
@@ -584,6 +596,7 @@ function updateInstances(dt) {
   const maxA = THREE.MathUtils.degToRad(params.maxAngle);
   const rotK = 1 - Math.exp(-dt * 10);
   const bankK = 1 - Math.exp(-dt * 4);
+  const velK = 1 - Math.exp(-dt * 7); // 진행 방향 평활 (약 0.15초)
   const ampK = 1 - Math.exp(-dt * 2.5);
   const arr = mesh.instanceMatrix.array;
   const hx = dims[0] / 2, hy = dims[1] / 2, hz = dims[2] / 2;
@@ -598,7 +611,8 @@ function updateInstances(dt) {
 
   for (let i = 0; i < n; i++) {
     const i3 = i * 3;
-    const sx = V[i3], sy = V[i3 + 1], sz = V[i3 + 2];
+    SV[i3] += (V[i3] - SV[i3]) * velK; SV[i3 + 1] += (V[i3 + 1] - SV[i3 + 1]) * velK; SV[i3 + 2] += (V[i3 + 2] - SV[i3 + 2]) * velK;
+    const sx = SV[i3], sy = SV[i3 + 1], sz = SV[i3 + 2];
     const vx = rx(sx, sy, sz), vy = ry(sx, sy, sz), vz = rz(sx, sy, sz);
     const sp = Math.hypot(vx, vy, vz) || 1;
     const fx = vx / sp, fy = vy / sp, fz = vz / sp;          // 진행 방향 (world)
@@ -609,9 +623,10 @@ function updateInstances(dt) {
     _z.set(-fx, -fy, -fz);
     _x.set(0, 1, 0).cross(_z);
     if (_x.lengthSq() < 1e-6) _x.fromArray(prevRight, i3); else _x.normalize();
-    // 선회 방향 가속 → 기울기 (오른쪽으로 돌면 오른쪽 날개가 내려감)
-    const lateral = (ax * _x.x + ay * _x.y + az * _x.z) / mf;
-    const bankT = THREE.MathUtils.clamp(lateral * 0.5, -1.1, 1.1);
+    // 선회 → 기울기: 매 프레임 요동치는 가속도 대신, 부드러운 진행 방향이 실제로 돈 각속도(rad/s)로 계산
+    const turn = ((fx - prevFwd[i3]) * _x.x + (fy - prevFwd[i3 + 1]) * _x.y + (fz - prevFwd[i3 + 2]) * _x.z) / Math.max(dt, 1e-3);
+    prevFwd[i3] = fx; prevFwd[i3 + 1] = fy; prevFwd[i3 + 2] = fz;
+    const bankT = THREE.MathUtils.clamp(turn * 0.35, -1.1, 1.1);
     bank[i] += (bankT - bank[i]) * bankK;
     _up.set(0, 1, 0).multiplyScalar(Math.cos(bank[i])).addScaledVector(_x, Math.sin(bank[i]));
     _x.crossVectors(_up, _z);
