@@ -8,6 +8,15 @@
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
   canvas { display: block; }
   #overlay { position: fixed; inset: 0; pointer-events: none; }
+  #toast {
+    position: fixed; left: 50%; bottom: 36px; transform: translateX(-50%);
+    font: 12px/1.4 -apple-system, BlinkMacSystemFont, sans-serif;
+    color: #ddd; background: rgba(30,30,30,.9); padding: 6px 12px; border-radius: 4px;
+    opacity: 0; transition: opacity .3s; pointer-events: none; max-width: 80vw;
+  }
+  #toast.show { opacity: 1; }
+  #toast.err { color: #ffb4b4; }
+  body.hide-ui #toast { display: none; }
   body.hide-ui .lil-gui, body.hide-ui #hint { display: none !important; }
   #hint {
     position: fixed; left: 12px; bottom: 10px;
@@ -232,7 +241,55 @@ function makeAxes() {
   return group;
 }
 const axes = makeAxes();
+axes.visible = false; // 연속사진에서는 기본으로 숨김 (A 키로 켜기)
 scene.add(axes);
+
+// ---- 머이브리지 격자 배경 --------------------------------------------
+// 피사체 뒤에 세운 격자판. 항상 카메라를 향하도록 스프레드 뒤쪽에 놓인다.
+// 3D 공간에 있으므로 원근이 적용되고, 격자는 화면 픽셀 기준으로 선명하게 그린다.
+const backdropUniforms = {
+  uBg:      { value: new THREE.Color('#4b4b4b') },
+  uLine:    { value: new THREE.Color('#b9b9b9') },
+  uSpacing: { value: 0.3 },   // 격자 간격 (1 = 100mm)
+  uWidth:   { value: 1.0 },    // 선 굵기 (px)
+};
+const backdrop = new THREE.Mesh(
+  new THREE.PlaneGeometry(60, 60),
+  new THREE.ShaderMaterial({
+    uniforms: backdropUniforms,
+    depthWrite: false,
+    vertexShader: `
+      varying vec2 vP;
+      void main() {
+        vP = position.xy;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: `
+      uniform vec3 uBg, uLine;
+      uniform float uSpacing, uWidth;
+      varying vec2 vP;
+      void main() {
+        vec2 g = vP / uSpacing;
+        vec2 d = abs(fract(g - 0.5) - 0.5) / fwidth(g);
+        float line = 1.0 - clamp(min(d.x, d.y) - (uWidth - 1.0) * 0.5, 0.0, 1.0);
+        gl_FragColor = vec4(mix(uBg, uLine, line), 1.0);
+        #include <colorspace_fragment>
+      }`,
+  })
+);
+backdrop.renderOrder = -1;
+scene.add(backdrop);
+const BACKDROP_DIST = 2.2; // 스프레드 중심에서 뒤로 떨어진 거리
+const _bdDir = new THREE.Vector3();
+function updateBackdrop() {
+  // 카메라 → 타깃 방향의 수평 성분 뒤쪽에 수직으로 세운다 (실제 촬영장의 벽처럼)
+  _bdDir.subVectors(controls.target, camera.position);
+  _bdDir.y = 0;
+  if (_bdDir.lengthSq() < 1e-6) _bdDir.set(0, 0, -1);
+  _bdDir.normalize();
+  backdrop.position.copy(controls.target).addScaledVector(_bdDir, BACKDROP_DIST * params.scale);
+  backdrop.lookAt(backdrop.position.x - _bdDir.x, backdrop.position.y, backdrop.position.z - _bdDir.z);
+}
 
 // ---- 날갯짓 -----------------------------------------------------------
 // 위상 φ에 대해 θ = A·(sin φ + b·sin 2φ)/norm  — 약간의 비대칭으로 생물적인 느낌
@@ -267,48 +324,100 @@ function refreshTextures() {
   uniforms.uHasBack.value = b ? 1 : 0;
   fitScale(b?.aspect, uniforms.uBackFit.value);
 }
+// 모든 브라우저(Safari 포함)에서 동작하도록 <img>로 디코드한 뒤 캔버스에 그려 텍스처로 만든다.
+// 큰 스캔 이미지(예: 6614×5197)는 GPU 메모리를 위해 긴 변 4096px 이하로 줄인다.
+const MAX_TEX = Math.min(4096, renderer.capabilities.maxTextureSize);
+const IMAGE_EXT = /\.(jpe?g|png|webp|gif|bmp|avif)$/i;
+const isImageFile = (f) => !!f && ((f.type && f.type.startsWith('image/')) || IMAGE_EXT.test(f.name));
+
+function decodeImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('이미지 디코드 실패: ' + file.name)); };
+    img.src = url;
+  });
+}
 async function loadImageFile(file) {
-  const bitmap = await createImageBitmap(file, { imageOrientation: 'flipY' });
-  const tex = new THREE.Texture(bitmap);
-  tex.flipY = false; // 이미 flipY 된 비트맵
+  const img = await decodeImage(file);
+  const w0 = img.naturalWidth, h0 = img.naturalHeight;
+  if (!w0 || !h0) throw new Error('이미지 크기를 읽을 수 없음: ' + file.name);
+  const k = Math.min(1, MAX_TEX / Math.max(w0, h0));
+  const w = Math.max(1, Math.round(w0 * k)), h = Math.max(1, Math.round(h0 * k));
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#fff';            // 투명 PNG는 종이 흰색 위에
+  ctx.fillRect(0, 0, w, h);
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, 0, 0, w, h);
+  const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
   tex.generateMipmaps = true;
   tex.minFilter = THREE.LinearMipmapLinearFilter;
   tex.needsUpdate = true;
-  return { tex, aspect: bitmap.width / bitmap.height, bitmap };
+  return { tex, aspect: w0 / h0, name: file.name };
 }
 function disposeSlot(slot) {
   const s = texState[slot];
   if (!s) return;
   s.tex.dispose();
-  s.bitmap.close?.();
   texState[slot] = null;
 }
+
+// 화면 하단 상태 메시지 (UI를 숨기면 같이 숨겨짐)
+const toastEl = document.createElement('div');
+toastEl.id = 'toast';
+document.body.appendChild(toastEl);
+let toastTimer;
+function toast(msg, isError = false) {
+  toastEl.textContent = msg;
+  toastEl.classList.toggle('err', isError);
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), isError ? 6000 : 2500);
+}
+
 async function setSlot(slot, file) {
-  if (!file || !file.type.startsWith('image/')) return;
+  if (!file) return;
+  if (!isImageFile(file)) { toast(`이미지 파일이 아닙니다: ${file.name}`, true); return; }
+  const label = slot === 'front' ? '앞면' : '뒷면';
   try {
     const loaded = await loadImageFile(file);
     disposeSlot(slot);
     texState[slot] = loaded;
     refreshTextures();
     restartSequence(); // 새 스프레드가 들어오면 왼쪽 위 칸부터 다시 촬영
+    toast(`${label}: ${file.name}`);
   } catch (err) {
-    console.error('이미지를 불러오지 못했습니다:', err);
+    console.error(err);
+    toast(`${label} 이미지를 불러오지 못했습니다 (${file.name}). JPG/PNG로 저장해 다시 시도하세요.`, true);
   }
 }
+
+// 문서에 붙어 있는 파일 입력을 재사용 (Safari에서 분리된 input은 change가 안 오는 경우가 있음)
+const fileInput = document.createElement('input');
+fileInput.type = 'file';
+fileInput.accept = 'image/*,.jpg,.jpeg,.png,.webp';
+fileInput.style.display = 'none';
+document.body.appendChild(fileInput);
+let pendingSlot = 'front';
+fileInput.addEventListener('change', () => {
+  const f = fileInput.files && fileInput.files[0];
+  fileInput.value = ''; // 같은 파일을 다시 골라도 change가 오도록
+  setSlot(pendingSlot, f);
+});
 function pickFile(slot) {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = 'image/jpeg,image/png,image/webp';
-  input.onchange = () => setSlot(slot, input.files[0]);
-  input.click();
+  pendingSlot = slot;
+  fileInput.click();
 }
 // 드래그 앤 드롭: 파일 1개 → 앞면, 2개 → 앞면 + 뒷면
 addEventListener('dragover', (e) => e.preventDefault());
 addEventListener('drop', (e) => {
   e.preventDefault();
-  const files = [...e.dataTransfer.files].filter(f => f.type.startsWith('image/'));
+  const files = [...e.dataTransfer.files].filter(isImageFile);
   if (files[0]) setSlot('front', files[0]);
   if (files[1]) setSlot('back', files[1]);
 });
@@ -383,6 +492,12 @@ fs.add(params, 'timeScale', 0.05, 1.5, 0.01).name('재생 속도');
 fs.add(params, 'hold', 0, 30, 0.5).name('완성 후 정지 (초)');
 fs.add(params, 'numbers').name('프레임 번호').onChange(() => { numbersDirty = true; });
 fs.add({ f: restartSequence }, 'f').name('처음부터 다시');
+const fb = gui.addFolder('격자 배경');
+fb.add(backdrop, 'visible').name('격자 배경 표시');
+fb.addColor({ c: '#4b4b4b' }, 'c').name('배경판 색').onChange(v => backdropUniforms.uBg.value.set(v));
+fb.addColor({ c: '#b9b9b9' }, 'c').name('격자선 색').onChange(v => backdropUniforms.uLine.value.set(v));
+fb.add(backdropUniforms.uSpacing, 'value', 0.05, 1, 0.01).name('격자 간격');
+fb.add(backdropUniforms.uWidth, 'value', 0.5, 4, 0.1).name('선 굵기 (px)');
 const fw = gui.addFolder('날갯짓');
 fw.add(params, 'maxAngle', 0, 85, 1).name('최대 접힘 각도 (°)');
 fw.add(params, 'frequency', 0, 4, 0.01).name('날갯짓 빈도 (Hz)');
@@ -430,6 +545,7 @@ renderer.setAnimationLoop(() => {
   phase = (phase + sdt * params.frequency * TAU) % TAU;
   const live = flapAngle(phase);
   controls.update();
+  updateBackdrop();
 
   const W = innerWidth, H = innerHeight;
   renderer.setScissorTest(false);
