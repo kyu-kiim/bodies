@@ -22,7 +22,7 @@
 </script>
 </head>
 <body>
-<div id="hint">H: UI 숨기기 · A: 축 표시 · F: 전체 화면 · 드래그: 회전 · 휠: 줌</div>
+<div id="hint">이미지 드롭: 1장 → 앞면, 2장 → 앞·뒷면 · H: UI 숨기기 · A: 축 표시 · F: 전체 화면 · 드래그: 회전 · 휠: 줌</div>
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -55,16 +55,16 @@ controls.enableDamping = true;
 controls.target.set(0, 0, 0);
 
 // ---- 조명: 무광 종이의 명암이 드러나도록 ---------------------------
-const hemi = new THREE.HemisphereLight(0xffffff, 0x222222, 0.6);
+const hemi = new THREE.HemisphereLight(0xffffff, 0x666666, 0.6);
 const key = new THREE.DirectionalLight(0xffffff, 2.2);
 key.position.set(2, 5, 1.5);
-const fill = new THREE.DirectionalLight(0xffffff, 0.35);
+const fill = new THREE.DirectionalLight(0xffffff, 0.6);
 fill.position.set(-3, -1, -2);
 scene.add(hemi, key, fill);
 function applyLight() {
   hemi.intensity = 0.6 * params.light;
   key.intensity = 2.2 * params.light;
-  fill.intensity = 0.35 * params.light;
+  fill.intensity = 0.6 * params.light;
 }
 
 // ---- 스프레드 지오메트리 ---------------------------------------------
@@ -98,7 +98,17 @@ function makeSpreadGeometry() {
 // 각 페이지는 접지선을 축으로 θ만큼 강체 회전한다 (휘거나 늘어나지 않음).
 //   x' = x·cosθ,  y' = |x|·sinθ
 //   n' = (-side·sinθ, cosθ, 0)
-const uniforms = { uAngle: { value: 0 } };
+const blankTex = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+blankTex.needsUpdate = true;
+const uniforms = {
+  uAngle:    { value: 0 },
+  uFront:    { value: blankTex },
+  uBack:     { value: blankTex },
+  uHasFront: { value: 0 },
+  uHasBack:  { value: 0 },
+  uFrontFit: { value: new THREE.Vector2(1, 1) },
+  uBackFit:  { value: new THREE.Vector2(1, 1) },
+};
 const material = new THREE.MeshStandardMaterial({
   color: 0xffffff,
   roughness: 1.0,
@@ -106,11 +116,14 @@ const material = new THREE.MeshStandardMaterial({
   side: THREE.DoubleSide,
 });
 material.onBeforeCompile = (shader) => {
-  shader.uniforms.uAngle = uniforms.uAngle;
+  Object.assign(shader.uniforms, uniforms);
   shader.vertexShader = shader.vertexShader
     .replace('#include <common>', `#include <common>
       attribute float aSide;
-      uniform float uAngle;`)
+      uniform float uAngle;
+      varying vec2 vSpreadUv;`)
+    .replace('#include <uv_vertex>', `#include <uv_vertex>
+      vSpreadUv = uv;`)
     .replace('#include <beginnormal_vertex>', `
       float cA = cos(uAngle), sA = sin(uAngle);
       vec3 objectNormal = vec3(-aSide * sA, cA, 0.0);
@@ -119,6 +132,31 @@ material.onBeforeCompile = (shader) => {
       #endif`)
     .replace('#include <begin_vertex>', `
       vec3 transformed = vec3(position.x * cA, abs(position.x) * sA, position.z);`);
+
+  // 앞면(+Y)과 뒷면에 서로 다른 텍스처.
+  // 이미지 왼쪽 절반 → 왼쪽 페이지, 오른쪽 절반 → 오른쪽 페이지.
+  // 뒷면은 아래에서 봤을 때 바르게 읽히도록 좌우를 뒤집어 매핑.
+  // fit: 이미지 비율을 유지(늘리지 않음)하기 위한 UV 스케일. 범위 밖은 종이 흰색.
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', `#include <common>
+      varying vec2 vSpreadUv;
+      uniform sampler2D uFront, uBack;
+      uniform float uHasFront, uHasBack;
+      uniform vec2 uFrontFit, uBackFit;`)
+    .replace('#include <map_fragment>', `
+      {
+        bool isFront = gl_FrontFacing;
+        vec2 suv = vSpreadUv;
+        if (!isFront) suv.x = 1.0 - suv.x;
+        vec2 fit = isFront ? uFrontFit : uBackFit;
+        vec2 tuv = (suv - 0.5) * fit + 0.5;
+        float inside = step(0.0, tuv.x) * step(tuv.x, 1.0) * step(0.0, tuv.y) * step(tuv.y, 1.0);
+        vec4 tf = texture2D(uFront, tuv);
+        vec4 tb = texture2D(uBack, tuv);
+        vec4 texel = isFront ? tf : tb;
+        float has = (isFront ? uHasFront : uHasBack) * inside;
+        diffuseColor.rgb *= mix(vec3(1.0), texel.rgb, has);
+      }`);
 };
 
 const spread = new THREE.Mesh(makeSpreadGeometry(), material);
@@ -185,12 +223,87 @@ function flapAngle(p) {
   return THREE.MathUtils.degToRad(params.maxAngle) * raw / norm;
 }
 
+// ---- 텍스처 업로드 ---------------------------------------------------
+const SPREAD_ASPECT = (PW * 2) / PH; // 280 / 220
+const texState = {
+  fit: 'contain',            // contain: 전체 보이기(여백) · cover: 꽉 채우기(일부 잘림)
+  front: null, back: null,   // { tex, aspect }
+  backSameAsFront: false,
+};
+function fitScale(aspect, out) {
+  if (!aspect) return out.set(1, 1);
+  const r = aspect / SPREAD_ASPECT; // >1: 이미지가 더 넓음
+  if (texState.fit === 'contain') return r > 1 ? out.set(1, r) : out.set(1 / r, 1);
+  return r > 1 ? out.set(1 / r, 1) : out.set(1, r);
+}
+function refreshTextures() {
+  const f = texState.front;
+  const b = texState.backSameAsFront ? texState.front : texState.back;
+  uniforms.uFront.value = f ? f.tex : blankTex;
+  uniforms.uHasFront.value = f ? 1 : 0;
+  fitScale(f?.aspect, uniforms.uFrontFit.value);
+  uniforms.uBack.value = b ? b.tex : blankTex;
+  uniforms.uHasBack.value = b ? 1 : 0;
+  fitScale(b?.aspect, uniforms.uBackFit.value);
+}
+async function loadImageFile(file) {
+  const bitmap = await createImageBitmap(file, { imageOrientation: 'flipY' });
+  const tex = new THREE.Texture(bitmap);
+  tex.flipY = false; // 이미 flipY 된 비트맵
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  tex.generateMipmaps = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.needsUpdate = true;
+  return { tex, aspect: bitmap.width / bitmap.height, bitmap };
+}
+function disposeSlot(slot) {
+  const s = texState[slot];
+  if (!s) return;
+  s.tex.dispose();
+  s.bitmap.close?.();
+  texState[slot] = null;
+}
+async function setSlot(slot, file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  try {
+    const loaded = await loadImageFile(file);
+    disposeSlot(slot);
+    texState[slot] = loaded;
+    refreshTextures();
+  } catch (err) {
+    console.error('이미지를 불러오지 못했습니다:', err);
+  }
+}
+function pickFile(slot) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/jpeg,image/png,image/webp';
+  input.onchange = () => setSlot(slot, input.files[0]);
+  input.click();
+}
+// 드래그 앤 드롭: 파일 1개 → 앞면, 2개 → 앞면 + 뒷면
+addEventListener('dragover', (e) => e.preventDefault());
+addEventListener('drop', (e) => {
+  e.preventDefault();
+  const files = [...e.dataTransfer.files].filter(f => f.type.startsWith('image/'));
+  if (files[0]) setSlot('front', files[0]);
+  if (files[1]) setSlot('back', files[1]);
+});
+
 // ---- GUI --------------------------------------------------------------
 const gui = new GUI({ title: 'Spread Wing' });
 const fw = gui.addFolder('날갯짓');
 fw.add(params, 'maxAngle', 0, 85, 1).name('최대 접힘 각도 (°)');
 fw.add(params, 'frequency', 0, 4, 0.01).name('날갯짓 빈도 (Hz)');
 fw.add(params, 'upDownBias', 0, 0.5, 0.01).name('위/아래 비대칭');
+const ft = gui.addFolder('텍스처');
+ft.add({ f() { pickFile('front'); } }, 'f').name('앞면 이미지 업로드');
+ft.add({ f() { pickFile('back'); } }, 'f').name('뒷면 이미지 업로드');
+ft.add(texState, 'backSameAsFront').name('뒷면 = 앞면').onChange(refreshTextures);
+ft.add(texState, 'fit', { '전체 보이기 (여백)': 'contain', '꽉 채우기 (잘림)': 'cover' })
+  .name('이미지 맞춤').onChange(refreshTextures);
+ft.add({ f() { disposeSlot('front'); disposeSlot('back'); refreshTextures(); } }, 'f').name('이미지 제거');
 const fv = gui.addFolder('시각 요소');
 fv.add(params, 'scale', 0.3, 3, 0.01).name('스프레드 크기').onChange(v => spread.scale.setScalar(v));
 fv.add(params, 'light', 0, 2, 0.01).name('조명 강도').onChange(applyLight);
