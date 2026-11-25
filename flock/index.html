@@ -31,7 +31,7 @@
 </script>
 </head>
 <body>
-<div id="hint">마우스: 군집이 따라감 · 드래그: 카메라 회전 · 휠: 줌 · 이미지 드롭 → 빈 타입(A, B, C…)에 차례로 · H: UI 숨기기 · F: 전체 화면</div>
+<div id="hint">마우스: 군집이 따라옴 · 오른쪽 버튼: 밀어내기 · 더블클릭: 흩어짐 · 드래그: 카메라 회전 · 휠: 줌 · 이미지 드롭 → 빈 타입(A, B, C…)에 차례로 · H: UI 숨기기 · F: 전체 화면</div>
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -43,18 +43,26 @@ import GUI from 'three/addons/libs/lil-gui.module.min.js';
 const MAX = 3000;          // 최대 개체 수 (버퍼는 한 번만 할당)
 const TYPE_LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
 
+// 군집 파라미터는 기존 bodies 사이트(js/opt.js)의 기본값을 그대로 사용한다.
+// 단위도 원본과 같다: 거리 = px, 속도 = px/frame(60fps 기준), 힘 = px/frame².
+// 3D 공간에서는 1px = 0.1 unit(= 1mm × 10)으로 그린다 → 스프레드 폭 280mm = 28px.
 const params = {
-  // 군집
+  // 군집 (원본 opt.js 기본값)
   count: 200,
-  speed: 7,            // 이동 속도 (units/s, 1 unit = 100mm)
-  maxForce: 9,         // 최대 회전(조향) 가속
-  separation: 2.2,
-  alignment: 1.0,
-  cohesion: 0.6,
-  radius: 8,           // 주변 개체 인식 반경
-  space: 34,           // 군집 활동 공간 반경
-  follow: 0.9,         // 마우스 따라가기 강도
-  wander: 0.25,        // 개체별 흔들림 (유기적인 흩어짐)
+  vision: 60,          // 주변 개체 인식 반경
+  alignment: 1.8,
+  bias: 1.5,           // 정렬 편향: 같은 방향으로 나는 이웃일수록 더 강하게 따름
+  cohesion: 1.0,
+  separation: 1.5,
+  maxForce: 0.2,       // 최대 회전(조향) 힘
+  minSpeed: 1,
+  maxSpeed: 4,         // 이동 속도
+  drag: 0.005,
+  noise: 0.5,
+  accuracyPower: 5,    // 이웃 표본 수 = 2^p (10 = 전부)
+  bounce: false,       // 경계: false = 반대편으로 이어짐(원본 기본), true = 튕김
+  space: 1.0,          // 활동 공간 크기 배율 (기본 360 × 200 × 280 px)
+  mouseFollow: true,   // 마우스를 향해 끌림 (원본: 왼쪽 버튼 = 끌기, 오른쪽 = 밀기)
   // 날갯짓
   maxAngle: 55,
   frequency: 1.6,
@@ -81,10 +89,11 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(params.background);
 
 const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 2000);
-const DEFAULT_CAM = new THREE.Vector3(0, 42, 62); // 위에서 비스듬히 내려다봄
+const DEFAULT_CAM = new THREE.Vector3(0, 27, 40); // 위에서 비스듬히 내려다봄
 camera.position.copy(DEFAULT_CAM);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
+controls.enablePan = false; // 오른쪽 버튼은 원본처럼 '밀어내기'에 사용
 
 const hemi = new THREE.HemisphereLight(0xffffff, 0x666666, 0.6);
 const key = new THREE.DirectionalLight(0xffffff, 2.2);
@@ -188,212 +197,286 @@ mesh.count = params.count;
 scene.add(mesh);
 
 // =====================================================================
-// Boids 상태
+// Boids — 기존 bodies 사이트(js/boid.js, js/flock.js, js/main.js)의 모델을 3D로 그대로 옮김
+//   update():   vel += acc·Δ → drag → noise 회전 → 최소/최대 속도 → pos += vel·Δ → 경계
+//   organize(): vision 크기 버킷에 분류
+//   flock():    정렬(bias^dot 가중) · 응집 · 분리(1/d²) → 각각 setMag(maxSpeed) − vel, maxForce 제한
+//   interact(): 마우스 끌기/밀기, 더블클릭 폭발
+// Δ = 60fps 기준 프레임 수 (원본 PIXI ticker delta, 최대 2)
 // =====================================================================
-const P = new Float32Array(MAX * 3);   // 위치
-const V = new Float32Array(MAX * 3);   // 속도
-const ACC = new Float32Array(MAX * 3); // 이번 프레임 가속 (기울기·날갯짓 변화에 사용)
+const PX = 0.1;                         // 1px → 0.1 world unit
+const BASE_DIMS = [360, 200, 280];      // 활동 공간 (px)
+const dims = [0, 0, 0];
+function updateDims() { for (let k = 0; k < 3; k++) dims[k] = BASE_DIMS[k] * params.space; }
+updateDims();
+
+const P = new Float64Array(MAX * 3);    // 위치 (px, 0..dims)
+const V = new Float64Array(MAX * 3);    // 속도 (px/frame)
+const ACC = new Float64Array(MAX * 3);  // 가속 (원본처럼 다음 프레임 update에서 사용)
 const phase = new Float32Array(MAX);
-const ampS = new Float32Array(MAX).fill(0.7); // 부드럽게 변하는 진폭 계수
-const bank = new Float32Array(MAX);           // 좌우 기울기 (rad)
-const uPhase = new Float32Array(MAX);  // 개체 고유 난수들 (0..1 또는 −1..1)
+const ampS = new Float32Array(MAX).fill(0.7);
+const bank = new Float32Array(MAX);
+const uPhase = new Float32Array(MAX);
 const uFreq = new Float32Array(MAX);
-const uSpeed = new Float32Array(MAX);
 const uAmp = new Float32Array(MAX);
 const uType = new Float32Array(MAX);
-const uWander = new Float32Array(MAX * 3);
 const quat = Array.from({ length: MAX }, () => new THREE.Quaternion());
 const prevRight = new Float32Array(MAX * 3);
 
-function randomInSphere(r) {
-  let x, y, z;
-  do { x = Math.random() * 2 - 1; y = Math.random() * 2 - 1; z = Math.random() * 2 - 1; } while (x * x + y * y + z * z > 1);
-  return [x * r, y * r, z * r];
+// 원본 V2D.random(mag): 임의 방향, 크기 mag (3D에서는 구면 위 균등 방향)
+function randomDir(out, o, mag) {
+  const z = Math.random() * 2 - 1, t = Math.random() * Math.PI * 2, r = Math.sqrt(1 - z * z);
+  out[o] = r * Math.cos(t) * mag; out[o + 1] = r * Math.sin(t) * mag; out[o + 2] = z * mag;
+}
+function resetBoid(i) {
+  const i3 = i * 3;
+  P[i3] = Math.random() * dims[0]; P[i3 + 1] = Math.random() * dims[1]; P[i3 + 2] = Math.random() * dims[2];
+  randomDir(V, i3, params.minSpeed + Math.random() * (params.maxSpeed - params.minSpeed));
+  ACC[i3] = ACC[i3 + 1] = ACC[i3 + 2] = 0;
 }
 for (let i = 0; i < MAX; i++) {
-  const [x, y, z] = randomInSphere(params.space * 0.6);
-  P.set([x, y * 0.5, z], i * 3);
-  const [vx, vy, vz] = randomInSphere(1);
-  const l = Math.hypot(vx, vy, vz) || 1;
-  V.set([vx / l * params.speed, vy / l * params.speed * 0.3, vz / l * params.speed], i * 3);
+  resetBoid(i);
   uPhase[i] = Math.random();
   uFreq[i] = Math.random() * 2 - 1;
-  uSpeed[i] = Math.random() * 2 - 1;
   uAmp[i] = Math.random() * 2 - 1;
   uType[i] = Math.random();
-  uWander[i * 3] = Math.random() * 100; uWander[i * 3 + 1] = Math.random() * 100; uWander[i * 3 + 2] = Math.random() * 100;
   phase[i] = Math.random() * Math.PI * 2;
   prevRight.set([1, 0, 0], i * 3);
 }
 
-// ---- 이웃 탐색: 공간 해시 그리드 (셀 크기 = 인식 반경, 27셀만 탐색) ----
-const HASH = 8192; // 2의 거듭제곱, ≥ 2·MAX
-const cellStart = new Int32Array(HASH + 1);
-const cellCursor = new Int32Array(HASH);
+// ---- organize(): vision 크기의 버킷 (원본 flock.js의 buckets를 3D 배열로) ----
+let gCols = 0, gRows = 0, gLays = 0, gScale = 0;
+let cellStart = new Int32Array(1), cellCursor = new Int32Array(1);
 const cellOf = new Int32Array(MAX);
 const sorted = new Int32Array(MAX);
-const MAX_NEIGHBORS = 28; // 개체당 고려하는 최대 이웃 수 (밀집 시 연산량 상한)
-
-const hash3 = (x, y, z) =>
-  ((Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791)) >>> 0) & (HASH - 1);
-
-function buildGrid(n, cs) {
-  cellStart.fill(0);
+function organize(n) {
+  const s = params.vision;
+  const c = Math.ceil(dims[0] / s), r = Math.ceil(dims[1] / s), l = Math.ceil(dims[2] / s);
+  if (c !== gCols || r !== gRows || l !== gLays || s !== gScale) {
+    gCols = c; gRows = r; gLays = l; gScale = s;
+    cellStart = new Int32Array(c * r * l + 1);
+    cellCursor = new Int32Array(c * r * l);
+  } else cellStart.fill(0);
   for (let i = 0; i < n; i++) {
-    const h = hash3(Math.floor(P[i * 3] / cs), Math.floor(P[i * 3 + 1] / cs), Math.floor(P[i * 3 + 2] / cs));
+    const i3 = i * 3;
+    const cx = Math.min(c - 1, Math.max(0, Math.floor(P[i3] / s)));
+    const cy = Math.min(r - 1, Math.max(0, Math.floor(P[i3 + 1] / s)));
+    const cz = Math.min(l - 1, Math.max(0, Math.floor(P[i3 + 2] / s)));
+    const h = (cz * r + cy) * c + cx;
     cellOf[i] = h;
     cellStart[h + 1]++;
   }
-  for (let h = 0; h < HASH; h++) cellStart[h + 1] += cellStart[h];
-  cellCursor.set(cellStart.subarray(0, HASH));
+  const N = c * r * l;
+  for (let h = 0; h < N; h++) cellStart[h + 1] += cellStart[h];
+  cellCursor.set(cellStart.subarray(0, N));
   for (let i = 0; i < n; i++) sorted[cellCursor[cellOf[i]]++] = i;
 }
 
-// =====================================================================
-// 마우스 → 3D 목표점 (카메라를 향하는 평면과 교차)
-// 마우스가 한동안 움직이지 않으면 공간 안을 천천히 도는 경로를 따라감
-// =====================================================================
-const target = new THREE.Vector3();
-const mouseTarget = new THREE.Vector3();
+// ---- 마우스 (원본 events.js / boid.interact) ----
+// 마우스 위치는 카메라를 향하는 평면(공간 중심을 지남)과의 교점으로 3D 좌표를 얻는다.
+const mouse = { x: 0, y: 0, z: 0, over: false, down: false, button: 0, moved: -1e9 };
 const ndc = new THREE.Vector2();
 const raycaster = new THREE.Raycaster();
 const plane = new THREE.Plane();
-const _camDir = new THREE.Vector3();
-let lastMouseT = -1e9, mouseInside = false;
-addEventListener('pointermove', (e) => {
+const _camDir = new THREE.Vector3(), _hit = new THREE.Vector3();
+let explode = 0;
+const explodePos = [0, 0, 0];
+renderer.domElement.addEventListener('pointermove', (e) => {
   ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
-  lastMouseT = performance.now();
-  mouseInside = true;
+  mouse.over = true; mouse.moved = performance.now();
 });
-document.addEventListener('pointerleave', () => { mouseInside = false; });
-function updateTarget(t) {
+renderer.domElement.addEventListener('pointerleave', () => { mouse.over = false; });
+renderer.domElement.addEventListener('pointerdown', (e) => { mouse.down = true; mouse.button = e.button; });
+addEventListener('pointerup', () => { mouse.down = false; });
+renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+renderer.domElement.addEventListener('dblclick', () => {
+  explode = 1; explodePos[0] = mouse.x; explodePos[1] = mouse.y; explodePos[2] = mouse.z;
+});
+function updateMouse() {
   camera.getWorldDirection(_camDir);
   plane.setFromNormalAndCoplanarPoint(_camDir, controls.target);
-  const idle = !mouseInside || performance.now() - lastMouseT > 6000;
-  if (!idle) {
-    raycaster.setFromCamera(ndc, camera);
-    if (raycaster.ray.intersectPlane(plane, mouseTarget)) {
-      const r = params.space;
-      if (mouseTarget.length() > r) mouseTarget.setLength(r);
-      target.lerp(mouseTarget, 0.25);
-      return;
-    }
+  raycaster.setFromCamera(ndc, camera);
+  if (raycaster.ray.intersectPlane(plane, _hit)) {
+    mouse.x = _hit.x / PX + dims[0] / 2;
+    mouse.y = _hit.y / PX + dims[1] / 2;
+    mouse.z = _hit.z / PX + dims[2] / 2;
   }
-  const r = params.space * 0.55;
-  mouseTarget.set(r * Math.sin(t * 0.11), r * 0.35 * Math.sin(t * 0.23 + 1.3), r * Math.cos(t * 0.07));
-  target.lerp(mouseTarget, 0.02);
 }
 
-// =====================================================================
-// 시뮬레이션
-// =====================================================================
+// ---- 시뮬레이션 한 프레임 (원본 Flock.update 순서) ----
 const TAU = Math.PI * 2;
 let globalSin = 0, globalCos = 1;
-
 function wave(p) {
   const b = params.upDownBias;
   return (Math.sin(p) + b * Math.sin(2 * p)) / (1 + b * 0.6);
 }
-
-// 조향 = (원하는 방향 × 최대속도) − 현재 속도, 크기는 maxForce로 제한.
-// 매 프레임 클로저를 만들지 않도록 공용 상태 S에 누적 (장시간 실행 시 GC 부담 감소)
-const S = { fx: 0, fy: 0, fz: 0, vx: 0, vy: 0, vz: 0, ms: 1, mf: 1 };
-function steer(dx, dy, dz, w) {
-  const l = Math.hypot(dx, dy, dz);
-  if (l < 1e-6 || w === 0) return;
-  let qx = dx / l * S.ms - S.vx, qy = dy / l * S.ms - S.vy, qz = dz / l * S.ms - S.vz;
-  const ql = Math.hypot(qx, qy, qz);
-  if (ql > S.mf) { const k = S.mf / ql; qx *= k; qy *= k; qz *= k; }
-  S.fx += qx * w; S.fy += qy * w; S.fz += qz * w;
+// setMag(maxSpeed) − vel, 크기를 maxForce로 제한 (V2D.setMag / V2D.max와 동일)
+const _st = [0, 0, 0];
+function steerTo(x, y, z, vx, vy, vz, ms, mf) {
+  const l2 = x * x + y * y + z * z;
+  const k = l2 > 0 ? ms / Math.sqrt(l2) : 0;
+  let sx = x * k - vx, sy = y * k - vy, sz = z * k - vz;
+  const m2 = sx * sx + sy * sy + sz * sz;
+  if (m2 > mf * mf) { const q = mf / Math.sqrt(m2); sx *= q; sy *= q; sz *= q; }
+  _st[0] = sx; _st[1] = sy; _st[2] = sz;
 }
 
-function stepBoids(dt, t) {
+function stepBoids(delta) {
   const n = params.count;
-  const r = params.radius, r2 = r * r;
-  const sepR = r * 0.5, sepR2 = sepR * sepR;
-  const R = params.space;
-  buildGrid(n, r);
+  const W = dims[0], H = dims[1], D = dims[2];
+  const { drag, minSpeed, maxSpeed, maxForce, alignment, cohesion, separation, bias } = params;
+  const noiseRange = (Math.PI / 80) * params.noise;
 
-  const tx = target.x, ty = target.y, tz = target.z;
+  // ---------- update() ----------
+  for (let i = 0; i < n; i++) {
+    const i3 = i * 3;
+    let vx = V[i3] + ACC[i3] * delta, vy = V[i3 + 1] + ACC[i3 + 1] * delta, vz = V[i3 + 2] + ACC[i3 + 2] * delta;
+    if (drag) { const k = 1 - drag; vx *= k; vy *= k; vz *= k; }
+    // noise: 진행 방향을 임의의 수직 축으로 ±noiseRange 회전 (원본 2D rotate의 3D판)
+    if (params.noise) {
+      const sp = Math.hypot(vx, vy, vz);
+      if (sp > 0) {
+        const a = (Math.random() * 2 - 1) * noiseRange;
+        let ux = Math.random() * 2 - 1, uy = Math.random() * 2 - 1, uz = Math.random() * 2 - 1;
+        const fx = vx / sp, fy = vy / sp, fz = vz / sp;
+        const d = ux * fx + uy * fy + uz * fz;
+        ux -= d * fx; uy -= d * fy; uz -= d * fz;
+        const ul = Math.hypot(ux, uy, uz);
+        if (ul > 1e-6) {
+          const c = Math.cos(a), s = Math.sin(a) * sp / ul;
+          vx = vx * c + ux * s; vy = vy * c + uy * s; vz = vz * c + uz * s;
+        }
+      }
+    }
+    // 최소 속도
+    if (minSpeed > 0.001) {
+      const s2 = vx * vx + vy * vy + vz * vz;
+      if (s2 === 0) { randomDir(V, i3, minSpeed); vx = V[i3]; vy = V[i3 + 1]; vz = V[i3 + 2]; }
+      else if (s2 < minSpeed * minSpeed) { const k = minSpeed / Math.sqrt(s2); vx *= k; vy *= k; vz *= k; }
+    }
+    // 최대 속도
+    {
+      const s2 = vx * vx + vy * vy + vz * vz;
+      if (s2 > maxSpeed * maxSpeed) { const k = maxSpeed / Math.sqrt(s2); vx *= k; vy *= k; vz *= k; }
+    }
+    V[i3] = vx; V[i3 + 1] = vy; V[i3 + 2] = vz;
+    let x = P[i3] + vx * delta, y = P[i3 + 1] + vy * delta, z = P[i3 + 2] + vz * delta;
+    // 경계
+    if (params.bounce) {
+      let ran = false;
+      if (x < 0 || x > W) { ran = true; V[i3] *= -1; }
+      if (y < 0 || y > H) { ran = true; V[i3 + 1] *= -1; }
+      if (z < 0 || z > D) { ran = true; V[i3 + 2] *= -1; }
+      if (ran) { x = Math.min(W, Math.max(0, x)); y = Math.min(H, Math.max(0, y)); z = Math.min(D, Math.max(0, z)); }
+    } else {
+      x = ((x % W) + W) % W; y = ((y % H) + H) % H; z = ((z % D) + D) % D;
+    }
+    // 수치 오류 방어 (장시간 전시 안정성)
+    if (!(Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) && Number.isFinite(V[i3] + V[i3 + 1] + V[i3 + 2]))) {
+      resetBoid(i); quat[i].identity(); bank[i] = 0; continue;
+    }
+    P[i3] = x; P[i3 + 1] = y; P[i3 + 2] = z;
+  }
+
+  // ---------- organize() ----------
+  organize(n);
+  const s = params.vision, sqVis = s * s;
+  const accuracy = params.accuracyPower >= 10 ? 0 : 2 ** params.accuracyPower;
+  const mouseForce = Math.max((maxSpeed * maxForce * (alignment + cohesion + separation + 1)) / 16, 0);
+  const useMouse = params.mouseFollow && mouse.over && performance.now() - mouse.moved < 8000;
+  const candS = new Int32Array(27), candE = new Int32Array(27);
+
   let sumSin = 0, sumCos = 0;
-
   for (let i = 0; i < n; i++) {
     const i3 = i * 3;
     const px = P[i3], py = P[i3 + 1], pz = P[i3 + 2];
     const vx = V[i3], vy = V[i3 + 1], vz = V[i3 + 2];
-    const maxSpeed = params.speed * (1 + 0.12 * uSpeed[i]);
-    const mf = params.maxForce;
+    let accx = 0, accy = 0, accz = 0;
 
-    // ---- 이웃 ------------------------------------------------------
-    let cnt = 0, sx = 0, sy = 0, sz = 0, ax = 0, ay = 0, az = 0, cx = 0, cy = 0, cz = 0;
-    const gx = Math.floor(px / r), gy = Math.floor(py / r), gz = Math.floor(pz / r);
-    outer:
-    for (let dz = -1; dz <= 1; dz++) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-      const h = hash3(gx + dx, gy + dy, gz + dz);
-      for (let k = cellStart[h], e = cellStart[h + 1]; k < e; k++) {
-        const j = sorted[k];
-        if (j === i) continue;
-        const j3 = j * 3;
-        const ox = px - P[j3], oy = py - P[j3 + 1], oz = pz - P[j3 + 2];
-        const d2 = ox * ox + oy * oy + oz * oz;
-        if (d2 > r2 || d2 === 0) continue;
-        cnt++;
-        ax += V[j3]; ay += V[j3 + 1]; az += V[j3 + 2];
-        cx += P[j3]; cy += P[j3 + 1]; cz += P[j3 + 2];
-        if (d2 < sepR2) { const w = 1 / d2; sx += ox * w; sy += oy * w; sz += oz * w; }
-        if (cnt >= MAX_NEIGHBORS) break outer;
+    if (s > 0) {
+      // ---------- neighbors(): 주변 27칸 후보 중 accuracy개 표본 ----------
+      const cx = Math.floor(px / s), cy = Math.floor(py / s), cz = Math.floor(pz / s);
+      let nc = 0, total = 0;
+      for (let dz = -1; dz <= 1; dz++) {
+        const zz = cz + dz; if (zz < 0 || zz >= gLays) continue;
+        for (let dy = -1; dy <= 1; dy++) {
+          const yy = cy + dy; if (yy < 0 || yy >= gRows) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = cx + dx; if (xx < 0 || xx >= gCols) continue;
+            const h = (zz * gRows + yy) * gCols + xx;
+            if (cellStart[h + 1] > cellStart[h]) { candS[nc] = cellStart[h]; candE[nc] = cellStart[h + 1]; total += candE[nc] - candS[nc]; nc++; }
+          }
+        }
+      }
+      const step = accuracy === 0 ? 1 : Math.max(1, Math.ceil(total / accuracy));
+      let k = Math.floor(Math.random() * step);
+
+      // ---------- flock() ----------
+      let cnt = 0;
+      let alx = 0, aly = 0, alz = 0, csx = 0, csy = 0, csz = 0, spx = 0, spy = 0, spz = 0;
+      for (let c = 0; c < nc; c++) {
+        const len = candE[c] - candS[c];
+        for (; k < len; k += step) {
+          const j = sorted[candS[c] + k];
+          if (j === i) continue;
+          const j3 = j * 3;
+          const ox = px - P[j3], oy = py - P[j3 + 1], oz = pz - P[j3 + 2];
+          const d2 = ox * ox + oy * oy + oz * oz;
+          if (d2 >= sqVis) continue;
+          cnt++;
+          const ovx = V[j3], ovy = V[j3 + 1], ovz = V[j3 + 2];
+          // 정렬: 이웃 속도 × bias^(속도 내적)
+          const b = bias ** Math.min(300, ovx * vx + ovy * vy + ovz * vz);
+          alx += ovx * b; aly += ovy * b; alz += ovz * b;
+          // 응집: 이웃 위치 평균
+          csx += P[j3]; csy += P[j3 + 1]; csz += P[j3 + 2];
+          // 분리: 가까울수록 강하게 (1/d²)
+          const w = 1 / (d2 || 0.00001);
+          spx += ox * w; spy += oy * w; spz += oz * w;
+        }
+        k -= len;
+      }
+      if (cnt > 0) {
+        steerTo(alx, aly, alz, vx, vy, vz, maxSpeed, maxForce);
+        accx += _st[0] * alignment; accy += _st[1] * alignment; accz += _st[2] * alignment;
+        steerTo(csx / cnt - px, csy / cnt - py, csz / cnt - pz, vx, vy, vz, maxSpeed, maxForce);
+        accx += _st[0] * cohesion; accy += _st[1] * cohesion; accz += _st[2] * cohesion;
+        steerTo(spx, spy, spz, vx, vy, vz, maxSpeed, maxForce);
+        accx += _st[0] * separation; accy += _st[1] * separation; accz += _st[2] * separation;
       }
     }
 
-    S.fx = 0; S.fy = 0; S.fz = 0;
-    S.vx = vx; S.vy = vy; S.vz = vz; S.ms = maxSpeed; S.mf = mf;
-    if (cnt > 0) {
-      steer(sx, sy, sz, params.separation);
-      steer(ax, ay, az, params.alignment);
-      steer(cx / cnt - px, cy / cnt - py, cz / cnt - pz, params.cohesion);
+    // ---------- interact(): 마우스 ----------
+    // 원본: 왼쪽 버튼을 누르면 끌어당김, 오른쪽 버튼은 밀어냄.
+    // 여기서는 '따라가기'를 위해 마우스가 화면 위에 있으면 끌어당기고, 오른쪽 버튼을 누르면 밀어냄.
+    if (useMouse || (mouse.down && mouse.button === 2)) {
+      let mx = mouse.x - px, my = mouse.y - py, mz = mouse.z - pz;
+      const d = mx * mx + my * my + mz * mz;
+      const mag = 10000 / (d || 1);
+      const l = Math.sqrt(d) || 1;
+      let q = mag / l;
+      mx *= q; my *= q; mz *= q;
+      const m2 = mx * mx + my * my + mz * mz;
+      if (m2 > mouseForce * mouseForce) { const r = mouseForce / Math.sqrt(m2); mx *= r; my *= r; mz *= r; }
+      if (mouse.down && mouse.button === 2) { accx -= mx; accy -= my; accz -= mz; }
+      else { accx += mx; accy += my; accz += mz; }
     }
-    // 목표점(마우스) — 가까워질수록 약해져서 목표 주위를 맴돌며 흩어졌다 모임
-    {
-      const ox = tx - px, oy = ty - py, oz = tz - pz;
-      const d = Math.hypot(ox, oy, oz);
-      const w = params.follow * Math.min(1, d / (R * 0.35));
-      steer(ox, oy, oz, w);
-    }
-    // 개체별 흔들림
-    if (params.wander > 0) {
-      const w3 = uWander;
-      steer(Math.sin(t * 0.7 + w3[i3]), 0.5 * Math.sin(t * 0.9 + w3[i3 + 1]), Math.cos(t * 0.6 + w3[i3 + 2]), params.wander);
-    }
-    // 공간 경계: 반경 R 밖으로 나가면 안쪽으로 부드럽게
-    {
-      const d = Math.hypot(px, py * 1.6, pz);
-      if (d > R) steer(-px, -py, -pz, 1.5 * Math.min(3, (d - R) / (R * 0.15)));
+    // 더블클릭 폭발
+    if (explode > 0.001) {
+      let ex = explodePos[0] - px, ey = explodePos[1] - py, ez = explodePos[2] - pz;
+      const d = ex * ex + ey * ey + ez * ez;
+      const l = Math.sqrt(d) || 1;
+      const q = (explode * 100000) / (d || 1) / l;
+      ex *= q; ey *= q; ez *= q;
+      const m2 = ex * ex + ey * ey + ez * ez, lim = mouseForce * 3;
+      if (m2 > lim * lim) { const r = lim / Math.sqrt(m2); ex *= r; ey *= r; ez *= r; }
+      accx -= ex; accy -= ey; accz -= ez;
     }
 
-    // ---- 적분 ------------------------------------------------------
-    let nvx = vx + S.fx * dt, nvy = vy + S.fy * dt, nvz = vz + S.fz * dt;
-    const sp = Math.hypot(nvx, nvy, nvz);
-    const minSpeed = maxSpeed * 0.45;
-    if (sp > maxSpeed) { const s = maxSpeed / sp; nvx *= s; nvy *= s; nvz *= s; }
-    else if (sp < minSpeed) {
-      if (sp < 1e-4) { nvx = minSpeed; nvy = 0; nvz = 0; }
-      else { const s = minSpeed / sp; nvx *= s; nvy *= s; nvz *= s; }
-    }
-    ACC[i3] = (nvx - vx) / dt; ACC[i3 + 1] = (nvy - vy) / dt; ACC[i3 + 2] = (nvz - vz) / dt;
-    if (!(Number.isFinite(nvx) && Number.isFinite(nvy) && Number.isFinite(nvz))) {
-      // 수치 오류 방어 (장시간 전시 안정성): 공간 안쪽에 다시 배치
-      V[i3] = maxSpeed; V[i3 + 1] = 0; V[i3 + 2] = 0;
-      P[i3] = 0; P[i3 + 1] = 0; P[i3 + 2] = 0;
-      ACC[i3] = ACC[i3 + 1] = ACC[i3 + 2] = 0;
-      phase[i] = 0; ampS[i] = 0.7; bank[i] = 0;
-      quat[i].identity();
-      continue;
-    }
-    V[i3] = nvx; V[i3 + 1] = nvy; V[i3 + 2] = nvz;
-    P[i3] = px + nvx * dt; P[i3 + 1] = py + nvy * dt; P[i3 + 2] = pz + nvz * dt;
-
+    ACC[i3] = accx; ACC[i3 + 1] = accy; ACC[i3 + 2] = accz;
     sumSin += Math.sin(phase[i]); sumCos += Math.cos(phase[i]);
   }
+  if (explode > 0.001) explode *= 0.9; else explode = 0;
   globalSin = sumSin; globalCos = sumCos;
 }
 
@@ -409,6 +492,8 @@ function updateInstances(dt) {
   const bankK = 1 - Math.exp(-dt * 4);
   const ampK = 1 - Math.exp(-dt * 2.5);
   const arr = mesh.instanceMatrix.array;
+  const hx = dims[0] / 2, hy = dims[1] / 2, hz = dims[2] / 2;
+  const mf = Math.max(params.maxForce, 1e-3);
   _s.setScalar(params.scale);
 
   for (let i = 0; i < n; i++) {
@@ -416,15 +501,15 @@ function updateInstances(dt) {
     const vx = V[i3], vy = V[i3 + 1], vz = V[i3 + 2];
     const sp = Math.hypot(vx, vy, vz) || 1;
     const fx = vx / sp, fy = vy / sp, fz = vz / sp;          // 진행 방향
-    const ax = ACC[i3], ay = ACC[i3 + 1], az = ACC[i3 + 2];
+    const ax = ACC[i3], ay = ACC[i3 + 1], az = ACC[i3 + 2];  // px/frame²
 
     // 로컬 축: z = −진행방향, x = 오른쪽 페이지, y = 앞면 법선
     _z.set(-fx, -fy, -fz);
     _x.set(0, 1, 0).cross(_z);
     if (_x.lengthSq() < 1e-6) _x.fromArray(prevRight, i3); else _x.normalize();
     // 선회 방향 가속 → 기울기 (오른쪽으로 돌면 오른쪽 날개가 내려감)
-    const lateral = ax * _x.x + ay * _x.y + az * _x.z;
-    const bankT = THREE.MathUtils.clamp(lateral * 0.09, -1.1, 1.1);
+    const lateral = (ax * _x.x + ay * _x.y + az * _x.z) / mf;
+    const bankT = THREE.MathUtils.clamp(lateral * 0.5, -1.1, 1.1);
     bank[i] += (bankT - bank[i]) * bankK;
     _up.set(0, 1, 0).multiplyScalar(Math.cos(bank[i])).addScaledVector(_x, Math.sin(bank[i]));
     _x.crossVectors(_up, _z);
@@ -435,15 +520,15 @@ function updateInstances(dt) {
     _q.setFromRotationMatrix(_m);
     quat[i].slerp(_q, rotK);
 
-    _p.set(P[i3], P[i3 + 1], P[i3 + 2]);
+    _p.set((P[i3] - hx) * PX, (P[i3 + 1] - hy) * PX, (P[i3 + 2] - hz) * PX);
     _m.compose(_p, quat[i], _s);
     _m.toArray(arr, i * 16);
 
     // 날갯짓: 상승·가속할수록 크고 빠르게, 하강할 때는 작게(활공)
-    const thrust = THREE.MathUtils.clamp((ax * fx + ay * fy + az * fz) / params.maxForce, -1, 1);
+    const thrust = THREE.MathUtils.clamp((ax * fx + ay * fy + az * fz) / mf, -1, 1);
     const ampT = THREE.MathUtils.clamp(0.6 + 0.9 * fy + 0.35 * thrust + 0.15 * Math.abs(bank[i]), 0.12, 1.25);
     ampS[i] += (ampT - ampS[i]) * ampK;
-    const freq = params.frequency * (1 + params.freqVar * uFreq[i]) * (0.8 + 0.3 * ampS[i]);
+    const freq = params.frequency * (1 + params.freqVar * uFreq[i]) * (0.8 + 0.3 * ampS[i]) * (0.7 + 0.3 * sp / Math.max(params.maxSpeed, 1e-3));
     phase[i] += TAU * freq * dt + kSync * Math.sin(meanPhase - phase[i]) * dt;
     if (phase[i] > 1e4) phase[i] -= TAU * 1000;
     const off = params.phaseVar * (1 - params.sync) * uPhase[i] * TAU;
@@ -570,17 +655,29 @@ function toast(msg, isError = false) {
 // GUI
 // =====================================================================
 const gui = new GUI({ title: 'Spread Flock' });
-const fF = gui.addFolder('군집');
-fF.add(params, 'count', 1, MAX, 1).name('개체 수').onChange((v) => { mesh.count = v; });
-fF.add(params, 'speed', 0.5, 25, 0.1).name('이동 속도');
-fF.add(params, 'maxForce', 0.5, 40, 0.1).name('최대 회전 속도');
+const fF = gui.addFolder('군집 (기존 bodies 모델)');
+fF.add(params, 'count', 1, MAX, 1).name('개체 수').onChange((v) => {
+  for (let i = mesh.count; i < v; i++) resetBoid(i); // 새로 생긴 개체는 원본처럼 임의 위치에서 시작
+  mesh.count = v;
+});
+fF.add(params, 'maxSpeed', 0, 20, 0.1).name('이동 속도 (maxSpeed)');
+fF.add(params, 'minSpeed', 0, 10, 0.1).name('최소 속도 (minSpeed)');
+fF.add(params, 'maxForce', 0, 2, 0.01).name('최대 회전 속도 (maxForce)');
 fF.add(params, 'separation', 0, 5, 0.01).name('분리 강도');
 fF.add(params, 'alignment', 0, 5, 0.01).name('정렬 강도');
+fF.add(params, 'bias', 1, 3, 0.01).name('정렬 편향 (bias)');
 fF.add(params, 'cohesion', 0, 5, 0.01).name('응집 강도');
-fF.add(params, 'radius', 1, 20, 0.1).name('주변 인식 반경');
-fF.add(params, 'space', 5, 120, 1).name('활동 공간 크기');
-fF.add(params, 'follow', 0, 4, 0.01).name('마우스 따라가기');
-fF.add(params, 'wander', 0, 2, 0.01).name('개체별 흔들림');
+fF.add(params, 'vision', 10, 200, 1).name('주변 인식 반경 (vision)');
+fF.add(params, 'drag', 0, 0.1, 0.001).name('감쇠 (drag)');
+fF.add(params, 'noise', 0, 5, 0.01).name('노이즈 (noise)');
+fF.add(params, 'accuracyPower', 0, 10, 1).name('이웃 표본 2^n (10=전부)');
+fF.add(params, 'space', 0.5, 3, 0.01).name('활동 공간 크기').onChange(() => {
+  const old = dims.slice(); updateDims();
+  for (let i = 0; i < MAX; i++) for (let k = 0; k < 3; k++) P[i * 3 + k] *= dims[k] / old[k];
+});
+fF.add(params, 'bounce').name('경계에서 튕김 (끄면 반대편으로)');
+fF.add(params, 'mouseFollow').name('마우스 따라가기');
+fF.add({ f() { for (let i = 0; i < MAX; i++) resetBoid(i); } }, 'f').name('다시 흩뿌리기');
 
 const fW = gui.addFolder('날갯짓');
 fW.add(params, 'maxAngle', 0, 85, 1).name('최대 접힘 각도 (°)');
@@ -629,21 +726,24 @@ addEventListener('resize', () => {
 });
 
 let simT = 0;
+function frame(dt) {
+  simT += dt;
+  updateMouse();
+  stepBoids(Math.min(dt * 60, 2)); // 원본 ticker delta (60fps = 1, 최대 2)
+  updateInstances(dt);
+}
 if (location.search.includes('debug')) window.__flock = {
-  P, V, mesh, params, camera, aAngle, aType, target,
-  // 검증용: 시뮬레이션을 고정 dt로 n스텝 진행
-  step(n, dt = 1 / 60) { for (let k = 0; k < n; k++) { simT += dt; updateTarget(simT); stepBoids(dt, simT); updateInstances(dt); } },
+  P, V, ACC, mesh, params, camera, aAngle, aType, mouse, dims,
+  // 검증용: 고정 dt로 n프레임 진행
+  step(n, dt = 1 / 60) { for (let k = 0; k < n; k++) frame(dt); },
 };
 reassignTypes();
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  // 탭 전환 등으로 프레임이 크게 끊겨도 시뮬레이션이 튀지 않도록 dt 상한
+  // 탭 전환 등으로 프레임이 크게 끊겨도 튀지 않도록 dt 상한
   const dt = THREE.MathUtils.clamp(clock.getDelta(), 1 / 240, 1 / 30);
-  simT += dt;
   controls.update();
-  updateTarget(simT);
-  stepBoids(dt, simT);
-  updateInstances(dt);
+  frame(dt);
   renderer.render(scene, camera);
 });
 </script>
