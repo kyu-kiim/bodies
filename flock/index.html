@@ -31,7 +31,7 @@
 </script>
 </head>
 <body>
-<div id="hint">마우스: 군집이 따라옴 · 오른쪽 버튼: 밀어내기 · 더블클릭: 흩어짐 · 드래그: 카메라 회전 · 휠: 줌 · 이미지 드롭 → 빈 타입(A, B, C…)에 차례로 · H: UI 숨기기 · F: 전체 화면</div>
+<div id="hint">마우스: 군집이 따라옴 · 오른쪽 버튼: 밀어내기 · 더블클릭: 흩어짐 · 드래그: 카메라 회전 · 휠: 줌 · 이미지 드롭 → 빈 타입(A, B, C…)에 차례로 · P: 화면 캡쳐 · H: UI 숨기기 · F: 전체 화면</div>
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -89,7 +89,7 @@ const params = {
 // =====================================================================
 // 렌더러 / 장면 / 카메라 / 조명
 // =====================================================================
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -875,6 +875,42 @@ fV.add(params, 'light', 0, 2, 0.01).name('조명 강도').onChange(applyLight);
 fV.addColor(params, 'background').name('배경색').onChange((v) => scene.background.set(v));
 fV.add(camera, 'fov', 10, 100, 1).name('카메라 원근감 (FOV)').onChange(() => { camera.updateProjectionMatrix(); rescaleSpace(); });
 fV.add({ f() { camera.position.copy(DEFAULT_CAM); controls.target.set(0, 0, 0); } }, 'f').name('카메라 초기화');
+
+// ---- 화면 캡쳐 (PNG) ----
+// 현재 화면을 배율만큼 더 큰 해상도로 다시 그려 저장한다. UI(패널·안내문)는 들어가지 않는다.
+const capture = { scale: 2, transparent: false };
+function captureScreen() {
+  const max = renderer.capabilities.maxTextureSize || 8192;
+  const pr = Math.max(0.5, Math.min(capture.scale, max / innerWidth, max / innerHeight));
+  const oldPR = renderer.getPixelRatio();
+  const oldBg = scene.background;
+  try {
+    renderer.setPixelRatio(pr);
+    renderer.setSize(innerWidth, innerHeight);
+    if (capture.transparent) { scene.background = null; renderer.setClearColor(0x000000, 0); }
+    renderer.render(scene, camera);
+    const w = renderer.domElement.width, h = renderer.domElement.height;
+    const d = new Date(), z = (x) => String(x).padStart(2, '0');
+    const name = `spread-flock-${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}.png`;
+    // toBlob은 호출 시점의 화면을 잡으므로 다음 줄에서 해상도를 되돌려도 된다
+    renderer.domElement.toBlob((blob) => {
+      if (!blob) { toast('캡쳐에 실패했습니다', true); return; }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+      toast(`캡쳐 저장: ${name} (${w}×${h})`);
+    }, 'image/png');
+  } finally {
+    scene.background = oldBg; renderer.setClearColor(0x000000, 1);
+    renderer.setPixelRatio(oldPR);
+    renderer.setSize(innerWidth, innerHeight);
+  }
+}
+const fCap = gui.addFolder('화면 캡쳐');
+fCap.add(capture, 'scale', { '1배 (화면 그대로)': 1, '2배': 2, '3배': 3, '4배 (인쇄용)': 4 }).name('해상도 배율');
+fCap.add(capture, 'transparent').name('배경 투명하게');
+fCap.add({ f: captureScreen }, 'f').name('📷 캡쳐 저장 (P)');
 fV.close();
 
 // =====================================================================
@@ -883,6 +919,7 @@ fV.close();
 addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return;
   if (e.key === 'h' || e.key === 'H') document.body.classList.toggle('hide-ui');
+  if (e.key === 'p' || e.key === 'P') captureScreen();
   if (e.key === 'f' || e.key === 'F') {
     if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
     else document.exitFullscreen?.();
