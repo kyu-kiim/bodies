@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Spread Flock</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; }
+  body.hide-ui .lil-gui, body.hide-ui #hint, body.hide-ui #toast { display: none !important; }
+  body.hide-ui { cursor: none; }
+  #hint {
+    position: fixed; left: 12px; bottom: 10px;
+    font: 11px/1.4 -apple-system, BlinkMacSystemFont, sans-serif;
+    color: rgba(255,255,255,.35); user-select: none; pointer-events: none;
+  }
+  #toast {
+    position: fixed; left: 50%; bottom: 36px; transform: translateX(-50%);
+    font: 12px/1.4 -apple-system, BlinkMacSystemFont, sans-serif;
+    color: #ddd; background: rgba(30,30,30,.9); padding: 6px 12px; border-radius: 4px;
+    opacity: 0; transition: opacity .3s; pointer-events: none; max-width: 80vw;
+  }
+  #toast.show { opacity: 1; }
+  #toast.err { color: #ffb4b4; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="hint">마우스: 군집이 따라감 · 드래그: 카메라 회전 · 휠: 줌 · 이미지 드롭 → 빈 타입(A, B, C…)에 차례로 · H: UI 숨기기 · F: 전체 화면</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import GUI from 'three/addons/libs/lil-gui.module.min.js';
+
+// =====================================================================
+// 파라미터
+// =====================================================================
+const MAX = 3000;          // 최대 개체 수 (버퍼는 한 번만 할당)
+const TYPE_LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
+
+const params = {
+  // 군집
+  count: 200,
+  speed: 7,            // 이동 속도 (units/s, 1 unit = 100mm)
+  maxForce: 9,         // 최대 회전(조향) 가속
+  separation: 2.2,
+  alignment: 1.0,
+  cohesion: 0.6,
+  radius: 8,           // 주변 개체 인식 반경
+  space: 34,           // 군집 활동 공간 반경
+  follow: 0.9,         // 마우스 따라가기 강도
+  wander: 0.25,        // 개체별 흔들림 (유기적인 흩어짐)
+  // 날갯짓
+  maxAngle: 55,
+  frequency: 1.6,
+  phaseVar: 1.0,       // 개체별 위상 차이 (0~1)
+  freqVar: 0.25,       // 개체별 날갯짓 속도 편차
+  sync: 0.15,          // 동기화 정도
+  upDownBias: 0.15,
+  // 시각
+  scale: 1.0,
+  light: 1.0,
+  background: '#000000',
+};
+
+// =====================================================================
+// 렌더러 / 장면 / 카메라 / 조명
+// =====================================================================
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(params.background);
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 2000);
+const DEFAULT_CAM = new THREE.Vector3(0, 42, 62); // 위에서 비스듬히 내려다봄
+camera.position.copy(DEFAULT_CAM);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+const hemi = new THREE.HemisphereLight(0xffffff, 0x666666, 0.6);
+const key = new THREE.DirectionalLight(0xffffff, 2.2);
+key.position.set(2, 5, 1.5);
+const fill = new THREE.DirectionalLight(0xffffff, 0.6);
+fill.position.set(-3, -1, -2);
+scene.add(hemi, key, fill);
+function applyLight() {
+  hemi.intensity = 0.6 * params.light;
+  key.intensity = 2.2 * params.light;
+  fill.intensity = 0.6 * params.light;
+}
+
+// =====================================================================
+// 스프레드 지오메트리 (140×220mm 페이지 2장, 접지선 = 로컬 Z축)
+// 로컬 −Z = 진행 방향(이미지 위쪽), +Y = 앞면
+// =====================================================================
+const PW = 1.4, PH = 2.2;
+function makeSpreadGeometry() {
+  const g = new THREE.BufferGeometry();
+  const pos = [], uv = [], side = [], idx = [];
+  const quad = (x0, x1, u0, u1, s) => {
+    const b = pos.length / 3;
+    pos.push(x0, 0, -PH / 2,  x1, 0, -PH / 2,  x1, 0, PH / 2,  x0, 0, PH / 2);
+    uv.push(u0, 1,  u1, 1,  u1, 0,  u0, 0);
+    side.push(s, s, s, s);
+    idx.push(b, b + 2, b + 1,  b, b + 3, b + 2);
+  };
+  quad(-PW, 0, 0.0, 0.5, -1);
+  quad(0, PW, 0.5, 1.0, 1);
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(new Array(pos.length).fill(0).map((_, i) => (i % 3 === 1 ? 1 : 0)), 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setAttribute('aSide', new THREE.Float32BufferAttribute(side, 1));
+  g.setIndex(idx);
+  return g;
+}
+const geometry = makeSpreadGeometry();
+
+// 개체별 속성: 접힘 각도(매 프레임), 앞면 타입(레이어 번호, −1 = 흰 종이)
+const aAngle = new THREE.InstancedBufferAttribute(new Float32Array(MAX), 1);
+aAngle.setUsage(THREE.DynamicDrawUsage);
+const aType = new THREE.InstancedBufferAttribute(new Float32Array(MAX).fill(-1), 1);
+geometry.setAttribute('aAngle', aAngle);
+geometry.setAttribute('aType', aType);
+
+// =====================================================================
+// 앞면 텍스처: Texture Array (레이어 하나 = 타입 하나)
+// 서로 다른 크기의 이미지를 같은 크기 레이어에 비율 유지(contain)로 그려 넣는다.
+// =====================================================================
+const LAYER_W = 1024, LAYER_H = Math.round(1024 * PH / (PW * 2)); // 1024 × 805 (280:220)
+const layerData = new Uint8Array(LAYER_W * LAYER_H * 4 * TYPE_LETTERS.length).fill(255);
+const texArray = new THREE.DataArrayTexture(layerData, LAYER_W, LAYER_H, TYPE_LETTERS.length);
+texArray.colorSpace = THREE.SRGBColorSpace;
+texArray.generateMipmaps = true;
+texArray.minFilter = THREE.LinearMipmapLinearFilter;
+texArray.magFilter = THREE.LinearFilter;
+texArray.anisotropy = renderer.capabilities.getMaxAnisotropy();
+texArray.needsUpdate = true;
+
+const material = new THREE.MeshStandardMaterial({
+  color: 0xffffff, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide,
+});
+material.onBeforeCompile = (shader) => {
+  shader.uniforms.uTexArr = { value: texArray };
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', `#include <common>
+      attribute float aSide;
+      attribute float aAngle;
+      attribute float aType;
+      varying vec2 vSpreadUv;
+      varying float vType;`)
+    .replace('#include <uv_vertex>', `#include <uv_vertex>
+      vSpreadUv = uv;
+      vType = aType;`)
+    // 각 페이지는 접지선을 축으로 강체 회전 (휘거나 늘어나지 않음)
+    .replace('#include <beginnormal_vertex>', `
+      float cA = cos(aAngle), sA = sin(aAngle);
+      vec3 objectNormal = vec3(-aSide * sA, cA, 0.0);
+      #ifdef USE_TANGENT
+        vec3 objectTangent = vec3(tangent.xyz);
+      #endif`)
+    .replace('#include <begin_vertex>', `
+      vec3 transformed = vec3(position.x * cA, abs(position.x) * sA, position.z);`);
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', `#include <common>
+      uniform highp sampler2DArray uTexArr;
+      varying vec2 vSpreadUv;
+      varying float vType;`)
+    .replace('#include <map_fragment>', `
+      if (gl_FrontFacing && vType > -0.5) {
+        vec4 t = texture(uTexArr, vec3(vSpreadUv, floor(vType + 0.5)));
+        diffuseColor.rgb *= t.rgb;
+      }`);
+};
+
+const mesh = new THREE.InstancedMesh(geometry, material, MAX);
+mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+mesh.frustumCulled = false;
+mesh.count = params.count;
+scene.add(mesh);
+
+// =====================================================================
+// Boids 상태
+// =====================================================================
+const P = new Float32Array(MAX * 3);   // 위치
+const V = new Float32Array(MAX * 3);   // 속도
+const ACC = new Float32Array(MAX * 3); // 이번 프레임 가속 (기울기·날갯짓 변화에 사용)
+const phase = new Float32Array(MAX);
+const ampS = new Float32Array(MAX).fill(0.7); // 부드럽게 변하는 진폭 계수
+const bank = new Float32Array(MAX);           // 좌우 기울기 (rad)
+const uPhase = new Float32Array(MAX);  // 개체 고유 난수들 (0..1 또는 −1..1)
+const uFreq = new Float32Array(MAX);
+const uSpeed = new Float32Array(MAX);
+const uAmp = new Float32Array(MAX);
+const uType = new Float32Array(MAX);
+const uWander = new Float32Array(MAX * 3);
+const quat = Array.from({ length: MAX }, () => new THREE.Quaternion());
+const prevRight = new Float32Array(MAX * 3);
+
+function randomInSphere(r) {
+  let x, y, z;
+  do { x = Math.random() * 2 - 1; y = Math.random() * 2 - 1; z = Math.random() * 2 - 1; } while (x * x + y * y + z * z > 1);
+  return [x * r, y * r, z * r];
+}
+for (let i = 0; i < MAX; i++) {
+  const [x, y, z] = randomInSphere(params.space * 0.6);
+  P.set([x, y * 0.5, z], i * 3);
+  const [vx, vy, vz] = randomInSphere(1);
+  const l = Math.hypot(vx, vy, vz) || 1;
+  V.set([vx / l * params.speed, vy / l * params.speed * 0.3, vz / l * params.speed], i * 3);
+  uPhase[i] = Math.random();
+  uFreq[i] = Math.random() * 2 - 1;
+  uSpeed[i] = Math.random() * 2 - 1;
+  uAmp[i] = Math.random() * 2 - 1;
+  uType[i] = Math.random();
+  uWander[i * 3] = Math.random() * 100; uWander[i * 3 + 1] = Math.random() * 100; uWander[i * 3 + 2] = Math.random() * 100;
+  phase[i] = Math.random() * Math.PI * 2;
+  prevRight.set([1, 0, 0], i * 3);
+}
+
+// ---- 이웃 탐색: 공간 해시 그리드 (셀 크기 = 인식 반경, 27셀만 탐색) ----
+const HASH = 8192; // 2의 거듭제곱, ≥ 2·MAX
+const cellStart = new Int32Array(HASH + 1);
+const cellCursor = new Int32Array(HASH);
+const cellOf = new Int32Array(MAX);
+const sorted = new Int32Array(MAX);
+const MAX_NEIGHBORS = 28; // 개체당 고려하는 최대 이웃 수 (밀집 시 연산량 상한)
+
+const hash3 = (x, y, z) =>
+  ((Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791)) >>> 0) & (HASH - 1);
+
+function buildGrid(n, cs) {
+  cellStart.fill(0);
+  for (let i = 0; i < n; i++) {
+    const h = hash3(Math.floor(P[i * 3] / cs), Math.floor(P[i * 3 + 1] / cs), Math.floor(P[i * 3 + 2] / cs));
+    cellOf[i] = h;
+    cellStart[h + 1]++;
+  }
+  for (let h = 0; h < HASH; h++) cellStart[h + 1] += cellStart[h];
+  cellCursor.set(cellStart.subarray(0, HASH));
+  for (let i = 0; i < n; i++) sorted[cellCursor[cellOf[i]]++] = i;
+}
+
+// =====================================================================
+// 마우스 → 3D 목표점 (카메라를 향하는 평면과 교차)
+// 마우스가 한동안 움직이지 않으면 공간 안을 천천히 도는 경로를 따라감
+// =====================================================================
+const target = new THREE.Vector3();
+const mouseTarget = new THREE.Vector3();
+const ndc = new THREE.Vector2();
+const raycaster = new THREE.Raycaster();
+const plane = new THREE.Plane();
+const _camDir = new THREE.Vector3();
+let lastMouseT = -1e9, mouseInside = false;
+addEventListener('pointermove', (e) => {
+  ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  lastMouseT = performance.now();
+  mouseInside = true;
+});
+document.addEventListener('pointerleave', () => { mouseInside = false; });
+function updateTarget(t) {
+  camera.getWorldDirection(_camDir);
+  plane.setFromNormalAndCoplanarPoint(_camDir, controls.target);
+  const idle = !mouseInside || performance.now() - lastMouseT > 6000;
+  if (!idle) {
+    raycaster.setFromCamera(ndc, camera);
+    if (raycaster.ray.intersectPlane(plane, mouseTarget)) {
+      const r = params.space;
+      if (mouseTarget.length() > r) mouseTarget.setLength(r);
+      target.lerp(mouseTarget, 0.25);
+      return;
+    }
+  }
+  const r = params.space * 0.55;
+  mouseTarget.set(r * Math.sin(t * 0.11), r * 0.35 * Math.sin(t * 0.23 + 1.3), r * Math.cos(t * 0.07));
+  target.lerp(mouseTarget, 0.02);
+}
+
+// =====================================================================
+// 시뮬레이션
+// =====================================================================
+const TAU = Math.PI * 2;
+let globalSin = 0, globalCos = 1;
+
+function wave(p) {
+  const b = params.upDownBias;
+  return (Math.sin(p) + b * Math.sin(2 * p)) / (1 + b * 0.6);
+}
+
+// 조향 = (원하는 방향 × 최대속도) − 현재 속도, 크기는 maxForce로 제한.
+// 매 프레임 클로저를 만들지 않도록 공용 상태 S에 누적 (장시간 실행 시 GC 부담 감소)
+const S = { fx: 0, fy: 0, fz: 0, vx: 0, vy: 0, vz: 0, ms: 1, mf: 1 };
+function steer(dx, dy, dz, w) {
+  const l = Math.hypot(dx, dy, dz);
+  if (l < 1e-6 || w === 0) return;
+  let qx = dx / l * S.ms - S.vx, qy = dy / l * S.ms - S.vy, qz = dz / l * S.ms - S.vz;
+  const ql = Math.hypot(qx, qy, qz);
+  if (ql > S.mf) { const k = S.mf / ql; qx *= k; qy *= k; qz *= k; }
+  S.fx += qx * w; S.fy += qy * w; S.fz += qz * w;
+}
+
+function stepBoids(dt, t) {
+  const n = params.count;
+  const r = params.radius, r2 = r * r;
+  const sepR = r * 0.5, sepR2 = sepR * sepR;
+  const R = params.space;
+  buildGrid(n, r);
+
+  const tx = target.x, ty = target.y, tz = target.z;
+  let sumSin = 0, sumCos = 0;
+
+  for (let i = 0; i < n; i++) {
+    const i3 = i * 3;
+    const px = P[i3], py = P[i3 + 1], pz = P[i3 + 2];
+    const vx = V[i3], vy = V[i3 + 1], vz = V[i3 + 2];
+    const maxSpeed = params.speed * (1 + 0.12 * uSpeed[i]);
+    const mf = params.maxForce;
+
+    // ---- 이웃 ------------------------------------------------------
+    let cnt = 0, sx = 0, sy = 0, sz = 0, ax = 0, ay = 0, az = 0, cx = 0, cy = 0, cz = 0;
+    const gx = Math.floor(px / r), gy = Math.floor(py / r), gz = Math.floor(pz / r);
+    outer:
+    for (let dz = -1; dz <= 1; dz++) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const h = hash3(gx + dx, gy + dy, gz + dz);
+      for (let k = cellStart[h], e = cellStart[h + 1]; k < e; k++) {
+        const j = sorted[k];
+        if (j === i) continue;
+        const j3 = j * 3;
+        const ox = px - P[j3], oy = py - P[j3 + 1], oz = pz - P[j3 + 2];
+        const d2 = ox * ox + oy * oy + oz * oz;
+        if (d2 > r2 || d2 === 0) continue;
+        cnt++;
+        ax += V[j3]; ay += V[j3 + 1]; az += V[j3 + 2];
+        cx += P[j3]; cy += P[j3 + 1]; cz += P[j3 + 2];
+        if (d2 < sepR2) { const w = 1 / d2; sx += ox * w; sy += oy * w; sz += oz * w; }
+        if (cnt >= MAX_NEIGHBORS) break outer;
+      }
+    }
+
+    S.fx = 0; S.fy = 0; S.fz = 0;
+    S.vx = vx; S.vy = vy; S.vz = vz; S.ms = maxSpeed; S.mf = mf;
+    if (cnt > 0) {
+      steer(sx, sy, sz, params.separation);
+      steer(ax, ay, az, params.alignment);
+      steer(cx / cnt - px, cy / cnt - py, cz / cnt - pz, params.cohesion);
+    }
+    // 목표점(마우스) — 가까워질수록 약해져서 목표 주위를 맴돌며 흩어졌다 모임
+    {
+      const ox = tx - px, oy = ty - py, oz = tz - pz;
+      const d = Math.hypot(ox, oy, oz);
+      const w = params.follow * Math.min(1, d / (R * 0.35));
+      steer(ox, oy, oz, w);
+    }
+    // 개체별 흔들림
+    if (params.wander > 0) {
+      const w3 = uWander;
+      steer(Math.sin(t * 0.7 + w3[i3]), 0.5 * Math.sin(t * 0.9 + w3[i3 + 1]), Math.cos(t * 0.6 + w3[i3 + 2]), params.wander);
+    }
+    // 공간 경계: 반경 R 밖으로 나가면 안쪽으로 부드럽게
+    {
+      const d = Math.hypot(px, py * 1.6, pz);
+      if (d > R) steer(-px, -py, -pz, 1.5 * Math.min(3, (d - R) / (R * 0.15)));
+    }
+
+    // ---- 적분 ------------------------------------------------------
+    let nvx = vx + S.fx * dt, nvy = vy + S.fy * dt, nvz = vz + S.fz * dt;
+    const sp = Math.hypot(nvx, nvy, nvz);
+    const minSpeed = maxSpeed * 0.45;
+    if (sp > maxSpeed) { const s = maxSpeed / sp; nvx *= s; nvy *= s; nvz *= s; }
+    else if (sp < minSpeed) {
+      if (sp < 1e-4) { nvx = minSpeed; nvy = 0; nvz = 0; }
+      else { const s = minSpeed / sp; nvx *= s; nvy *= s; nvz *= s; }
+    }
+    ACC[i3] = (nvx - vx) / dt; ACC[i3 + 1] = (nvy - vy) / dt; ACC[i3 + 2] = (nvz - vz) / dt;
+    if (!(Number.isFinite(nvx) && Number.isFinite(nvy) && Number.isFinite(nvz))) {
+      // 수치 오류 방어 (장시간 전시 안정성): 공간 안쪽에 다시 배치
+      V[i3] = maxSpeed; V[i3 + 1] = 0; V[i3 + 2] = 0;
+      P[i3] = 0; P[i3 + 1] = 0; P[i3 + 2] = 0;
+      ACC[i3] = ACC[i3 + 1] = ACC[i3 + 2] = 0;
+      phase[i] = 0; ampS[i] = 0.7; bank[i] = 0;
+      quat[i].identity();
+      continue;
+    }
+    V[i3] = nvx; V[i3 + 1] = nvy; V[i3 + 2] = nvz;
+    P[i3] = px + nvx * dt; P[i3 + 1] = py + nvy * dt; P[i3 + 2] = pz + nvz * dt;
+
+    sumSin += Math.sin(phase[i]); sumCos += Math.cos(phase[i]);
+  }
+  globalSin = sumSin; globalCos = sumCos;
+}
+
+// ---- 자세 (접지선을 진행 방향에 정렬 + 선회 시 기울기) + 날갯짓 -------
+const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3();
+const _p = new THREE.Vector3(), _x = new THREE.Vector3(), _y = new THREE.Vector3(), _z = new THREE.Vector3(), _up = new THREE.Vector3();
+function updateInstances(dt) {
+  const n = params.count;
+  const meanPhase = Math.atan2(globalSin, globalCos);
+  const kSync = 6 * params.sync;
+  const maxA = THREE.MathUtils.degToRad(params.maxAngle);
+  const rotK = 1 - Math.exp(-dt * 10);
+  const bankK = 1 - Math.exp(-dt * 4);
+  const ampK = 1 - Math.exp(-dt * 2.5);
+  const arr = mesh.instanceMatrix.array;
+  _s.setScalar(params.scale);
+
+  for (let i = 0; i < n; i++) {
+    const i3 = i * 3;
+    const vx = V[i3], vy = V[i3 + 1], vz = V[i3 + 2];
+    const sp = Math.hypot(vx, vy, vz) || 1;
+    const fx = vx / sp, fy = vy / sp, fz = vz / sp;          // 진행 방향
+    const ax = ACC[i3], ay = ACC[i3 + 1], az = ACC[i3 + 2];
+
+    // 로컬 축: z = −진행방향, x = 오른쪽 페이지, y = 앞면 법선
+    _z.set(-fx, -fy, -fz);
+    _x.set(0, 1, 0).cross(_z);
+    if (_x.lengthSq() < 1e-6) _x.fromArray(prevRight, i3); else _x.normalize();
+    // 선회 방향 가속 → 기울기 (오른쪽으로 돌면 오른쪽 날개가 내려감)
+    const lateral = ax * _x.x + ay * _x.y + az * _x.z;
+    const bankT = THREE.MathUtils.clamp(lateral * 0.09, -1.1, 1.1);
+    bank[i] += (bankT - bank[i]) * bankK;
+    _up.set(0, 1, 0).multiplyScalar(Math.cos(bank[i])).addScaledVector(_x, Math.sin(bank[i]));
+    _x.crossVectors(_up, _z);
+    if (_x.lengthSq() < 1e-6) _x.fromArray(prevRight, i3); else _x.normalize();
+    _x.toArray(prevRight, i3);
+    _y.crossVectors(_z, _x);
+    _m.makeBasis(_x, _y, _z);
+    _q.setFromRotationMatrix(_m);
+    quat[i].slerp(_q, rotK);
+
+    _p.set(P[i3], P[i3 + 1], P[i3 + 2]);
+    _m.compose(_p, quat[i], _s);
+    _m.toArray(arr, i * 16);
+
+    // 날갯짓: 상승·가속할수록 크고 빠르게, 하강할 때는 작게(활공)
+    const thrust = THREE.MathUtils.clamp((ax * fx + ay * fy + az * fz) / params.maxForce, -1, 1);
+    const ampT = THREE.MathUtils.clamp(0.6 + 0.9 * fy + 0.35 * thrust + 0.15 * Math.abs(bank[i]), 0.12, 1.25);
+    ampS[i] += (ampT - ampS[i]) * ampK;
+    const freq = params.frequency * (1 + params.freqVar * uFreq[i]) * (0.8 + 0.3 * ampS[i]);
+    phase[i] += TAU * freq * dt + kSync * Math.sin(meanPhase - phase[i]) * dt;
+    if (phase[i] > 1e4) phase[i] -= TAU * 1000;
+    const off = params.phaseVar * (1 - params.sync) * uPhase[i] * TAU;
+    aAngle.array[i] = maxA * (1 + 0.15 * uAmp[i]) * ampS[i] * wave(phase[i] + off);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  aAngle.needsUpdate = true;
+}
+
+// =====================================================================
+// 앞면 타입 A–F 업로드
+// =====================================================================
+const slots = TYPE_LETTERS.map((letter) => ({ letter, name: '—', loaded: false }));
+const MAX_DECODE = 4096;
+const IMAGE_EXT = /\.(jpe?g|png|webp|gif|bmp|avif)$/i;
+const isImageFile = (f) => !!f && ((f.type && f.type.startsWith('image/')) || IMAGE_EXT.test(f.name));
+
+function decodeImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('decode failed')); };
+    img.src = url;
+  });
+}
+const layerCanvas = document.createElement('canvas');
+layerCanvas.width = LAYER_W; layerCanvas.height = LAYER_H;
+const lctx = layerCanvas.getContext('2d', { willReadFrequently: true });
+
+// 이미지를 레이어에 비율 유지로 배치 (늘리지 않음). 남는 부분은 종이 흰색.
+function writeLayer(layer, img) {
+  lctx.setTransform(1, 0, 0, 1, 0, 0);
+  lctx.fillStyle = '#fff';
+  lctx.fillRect(0, 0, LAYER_W, LAYER_H);
+  if (img) {
+    const iw = img.naturalWidth, ih = img.naturalHeight;
+    const k = Math.min(LAYER_W / iw, LAYER_H / ih);
+    const w = iw * k, h = ih * k;
+    // 3D 텍스처는 flipY가 없으므로 위아래를 뒤집어 그린다
+    lctx.translate(0, LAYER_H);
+    lctx.scale(1, -1);
+    lctx.imageSmoothingQuality = 'high';
+    lctx.drawImage(img, (LAYER_W - w) / 2, (LAYER_H - h) / 2, w, h);
+  }
+  const px = lctx.getImageData(0, 0, LAYER_W, LAYER_H).data;
+  layerData.set(px, layer * LAYER_W * LAYER_H * 4);
+  texArray.needsUpdate = true;
+}
+function reassignTypes() {
+  const loaded = slots.map((s, i) => (s.loaded ? i : -1)).filter((i) => i >= 0);
+  for (let i = 0; i < MAX; i++) {
+    aType.array[i] = loaded.length ? loaded[Math.floor(uType[i] * loaded.length)] : -1;
+  }
+  aType.needsUpdate = true;
+  typeControllers.forEach((c) => c.updateDisplay());
+}
+async function setTypeImage(index, file) {
+  if (!file) return;
+  if (!isImageFile(file)) { toast(`이미지 파일이 아닙니다: ${file.name}`, true); return; }
+  try {
+    const img = await decodeImage(file);
+    if (!img.naturalWidth) throw new Error('size');
+    writeLayer(index, img);
+    slots[index].loaded = true;
+    slots[index].name = file.name;
+    reassignTypes();
+    toast(`타입 ${TYPE_LETTERS[index]}: ${file.name}`);
+  } catch (e) {
+    console.error(e);
+    slots[index].loaded = slots[index].name !== '—';
+    toast(`타입 ${TYPE_LETTERS[index]} 이미지를 불러오지 못했습니다 (${file.name})`, true);
+  }
+}
+function clearType(index) {
+  writeLayer(index, null);
+  slots[index].loaded = false;
+  slots[index].name = '—';
+  reassignTypes();
+}
+
+const fileInput = document.createElement('input');
+fileInput.type = 'file';
+fileInput.accept = 'image/*,.jpg,.jpeg,.png,.webp';
+fileInput.style.display = 'none';
+document.body.appendChild(fileInput);
+let pendingType = 0;
+fileInput.addEventListener('change', () => {
+  const f = fileInput.files && fileInput.files[0];
+  fileInput.value = '';
+  setTypeImage(pendingType, f);
+});
+function pickType(index) { pendingType = index; fileInput.click(); }
+
+// 드롭: 여러 장이면 빈 타입부터 차례로 채움 (빈 타입이 없으면 A부터 덮어씀)
+addEventListener('dragover', (e) => e.preventDefault());
+addEventListener('drop', async (e) => {
+  e.preventDefault();
+  const files = [...e.dataTransfer.files].filter(isImageFile);
+  let cursor = 0;
+  for (const f of files) {
+    let idx = slots.findIndex((s, i) => i >= cursor && !s.loaded);
+    if (idx < 0) idx = cursor % slots.length;
+    cursor = idx + 1;
+    slots[idx].loaded = true; // 순서 예약
+    await setTypeImage(idx, f);
+  }
+});
+
+// ---- 상태 메시지 ----
+const toastEl = document.createElement('div');
+toastEl.id = 'toast';
+document.body.appendChild(toastEl);
+let toastTimer;
+function toast(msg, isError = false) {
+  toastEl.textContent = msg;
+  toastEl.classList.toggle('err', isError);
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), isError ? 6000 : 2500);
+}
+
+// =====================================================================
+// GUI
+// =====================================================================
+const gui = new GUI({ title: 'Spread Flock' });
+const fF = gui.addFolder('군집');
+fF.add(params, 'count', 1, MAX, 1).name('개체 수').onChange((v) => { mesh.count = v; });
+fF.add(params, 'speed', 0.5, 25, 0.1).name('이동 속도');
+fF.add(params, 'maxForce', 0.5, 40, 0.1).name('최대 회전 속도');
+fF.add(params, 'separation', 0, 5, 0.01).name('분리 강도');
+fF.add(params, 'alignment', 0, 5, 0.01).name('정렬 강도');
+fF.add(params, 'cohesion', 0, 5, 0.01).name('응집 강도');
+fF.add(params, 'radius', 1, 20, 0.1).name('주변 인식 반경');
+fF.add(params, 'space', 5, 120, 1).name('활동 공간 크기');
+fF.add(params, 'follow', 0, 4, 0.01).name('마우스 따라가기');
+fF.add(params, 'wander', 0, 2, 0.01).name('개체별 흔들림');
+
+const fW = gui.addFolder('날갯짓');
+fW.add(params, 'maxAngle', 0, 85, 1).name('최대 접힘 각도 (°)');
+fW.add(params, 'frequency', 0, 5, 0.01).name('날갯짓 빈도 (Hz)');
+fW.add(params, 'phaseVar', 0, 1, 0.01).name('개체별 위상 차이');
+fW.add(params, 'freqVar', 0, 0.8, 0.01).name('개체별 속도 편차');
+fW.add(params, 'sync', 0, 1, 0.01).name('동기화 정도');
+fW.add(params, 'upDownBias', 0, 0.5, 0.01).name('위/아래 비대칭');
+
+const fT = gui.addFolder('앞면 타입');
+const typeControllers = [];
+TYPE_LETTERS.forEach((letter, i) => {
+  typeControllers.push(fT.add(slots[i], 'name').name(`${letter}`).disable());
+  fT.add({ f() { pickType(i); } }, 'f').name(`${letter} 업로드 / 교체`);
+});
+fT.add({ f() { slots.forEach((_, i) => { if (slots[i].loaded) clearType(i); }); } }, 'f').name('모두 제거');
+// D–F는 접어 둔 느낌으로: 처음엔 A–C만 보이도록 GUI 간결화
+fT.controllers.forEach((c, k) => { if (k >= 6 && k < 12) c.hide(); });
+fT.add({ more: false }, 'more').name('D–F 타입 보기').onChange((v) => {
+  fT.controllers.forEach((c, k) => { if (k >= 6 && k < 12) (v ? c.show() : c.hide()); });
+});
+
+const fV = gui.addFolder('시각 요소');
+fV.add(params, 'scale', 0.2, 4, 0.01).name('스프레드 크기');
+fV.add(params, 'light', 0, 2, 0.01).name('조명 강도').onChange(applyLight);
+fV.addColor(params, 'background').name('배경색').onChange((v) => scene.background.set(v));
+fV.add(camera, 'fov', 10, 100, 1).name('카메라 원근감 (FOV)').onChange(() => camera.updateProjectionMatrix());
+fV.add({ f() { camera.position.copy(DEFAULT_CAM); controls.target.set(0, 0, 0); } }, 'f').name('카메라 초기화');
+fV.close();
+
+// =====================================================================
+// 키 / 리사이즈 / 루프
+// =====================================================================
+addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'h' || e.key === 'H') document.body.classList.toggle('hide-ui');
+  if (e.key === 'f' || e.key === 'F') {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+    else document.exitFullscreen?.();
+  }
+});
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let simT = 0;
+if (location.search.includes('debug')) window.__flock = {
+  P, V, mesh, params, camera, aAngle, aType, target,
+  // 검증용: 시뮬레이션을 고정 dt로 n스텝 진행
+  step(n, dt = 1 / 60) { for (let k = 0; k < n; k++) { simT += dt; updateTarget(simT); stepBoids(dt, simT); updateInstances(dt); } },
+};
+reassignTypes();
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  // 탭 전환 등으로 프레임이 크게 끊겨도 시뮬레이션이 튀지 않도록 dt 상한
+  const dt = THREE.MathUtils.clamp(clock.getDelta(), 1 / 240, 1 / 30);
+  simT += dt;
+  controls.update();
+  updateTarget(simT);
+  stepBoids(dt, simT);
+  updateInstances(dt);
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
