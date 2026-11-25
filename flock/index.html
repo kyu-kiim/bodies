@@ -104,6 +104,8 @@ camera.position.copy(DEFAULT_CAM);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.enablePan = false; // 오른쪽 버튼은 원본처럼 '밀어내기'에 사용
+controls.minDistance = 10;
+controls.maxDistance = DEFAULT_CAM.length() * 4; // 너무 멀어지면 공간이 지나치게 커져 개체가 희박해짐
 
 const hemi = new THREE.HemisphereLight(0xffffff, 0x666666, 0.6);
 const key = new THREE.DirectionalLight(0xffffff, 2.2);
@@ -226,13 +228,17 @@ const SIM_Q = (() => {
   c.lookAt(0, 0, 0);
   return c.quaternion.clone();
 })();
+// 활동 공간은 '지금 카메라가 보는 화면'에 붙어 있다: 축 = 카메라 방향(SIM_Q), 중심 = 카메라가 보는 점(SIM_C).
+// 카메라를 돌리거나 뒤로 빼면 공간도 따라 커지고 돌아가서, 경계가 항상 화면 밖에 있다.
 const SIM_Q_INV = SIM_Q.clone().invert();
+const SIM_C = new THREE.Vector3();
 const SIM_M = new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(SIM_Q)).elements; // 열 우선
+const camDist = () => camera.position.distanceTo(controls.target);
 const dims = [0, 0, 0];
 const worldPerPx = () => PX * params.spacing;
 let visFrac = 0.7;
 function updateDims() {
-  const L = DEFAULT_CAM.length();
+  const L = camDist();
   const depthW = L * 0.5 * params.space;                        // 공간의 깊이 (world)
   const far = L + depthW * 0.5;             // 가장 깊은 곳에서도 화면을 다 덮도록 (경계가 화면 안에 보이지 않게)
   const halfH = far * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * params.space * 1.1;
@@ -252,6 +258,40 @@ function rescaleSpace() {
   for (let i = 0; i < MAX; i++) for (let k = 0; k < 3; k++) P[i * 3 + k] *= dims[k] / (old[k] || dims[k]);
 }
 updateDims();
+
+// 카메라가 움직였을 때: 모든 개체의 실제(world) 위치는 그대로 두고, 새 화면 기준 공간 좌표로 옮겨 적는다.
+// 새 공간 밖으로 나간 개체는 반대편으로 넘어가는데, 공간이 화면보다 크므로 그 순간은 화면 밖이다.
+const _Qo = new THREE.Quaternion(), _Co = new THREE.Vector3(), _R = new THREE.Matrix3(), _Rm = new THREE.Matrix4();
+const _camKey = { q: new THREE.Quaternion(), p: new THREE.Vector3(), t: new THREE.Vector3() };
+function reframe() {
+  _Qo.copy(SIM_Q); _Co.copy(SIM_C);
+  const old = dims.slice();
+  SIM_Q.copy(camera.quaternion); SIM_Q_INV.copy(SIM_Q).invert(); SIM_C.copy(controls.target);
+  SIM_M.splice(0, 9, ...new THREE.Matrix3().setFromMatrix4(_Rm.makeRotationFromQuaternion(SIM_Q)).elements);
+  updateDims();
+  // 상대 회전 R = Qn⁻¹·Qo (옛 공간 축 → 새 공간 축)
+  _R.setFromMatrix4(_Rm.makeRotationFromQuaternion(_Q2.copy(SIM_Q_INV).multiply(_Qo)));
+  const r = _R.elements, k = 1 / worldPerPx(), wpp = worldPerPx();
+  // 중심 이동(world) → 새 공간 축, px 단위
+  _V3.copy(_Co).sub(SIM_C).applyQuaternion(SIM_Q_INV).multiplyScalar(k);
+  const rot = (A, o) => { const x = A[o], y = A[o + 1], z = A[o + 2];
+    A[o] = r[0] * x + r[3] * y + r[6] * z; A[o + 1] = r[1] * x + r[4] * y + r[7] * z; A[o + 2] = r[2] * x + r[5] * y + r[8] * z; };
+  for (let i = 0; i < MAX; i++) {
+    const o = i * 3;
+    P[o] -= old[0] / 2; P[o + 1] -= old[1] / 2; P[o + 2] -= old[2] / 2;
+    rot(P, o);
+    for (let a = 0; a < 3; a++) { const d = dims[a]; const v = P[o + a] + _V3.getComponent(a) + d / 2; P[o + a] = ((v % d) + d) % d; }
+    rot(V, o); rot(ACC, o); rot(SV, o); rot(NW, o);
+  }
+  void wpp;
+}
+const _Q2 = new THREE.Quaternion(), _V3 = new THREE.Vector3();
+function checkCamera() {
+  const moved = _camKey.q.angleTo(camera.quaternion) > 1e-5 || _camKey.p.distanceToSquared(camera.position) > 1e-8 || _camKey.t.distanceToSquared(controls.target) > 1e-8;
+  if (!moved) return;
+  _camKey.q.copy(camera.quaternion); _camKey.p.copy(camera.position); _camKey.t.copy(controls.target);
+  reframe();
+}
 
 const P = new Float64Array(MAX * 3);    // 위치 (px, 0..dims)
 const V = new Float64Array(MAX * 3);    // 속도 (px/frame)
@@ -351,6 +391,7 @@ function updateMouse() {
   if (raycaster.ray.intersectPlane(plane, _hit)) {
     _hit.applyQuaternion(SIM_Q_INV); // world → 시뮬레이션 축
     const k = 1 / worldPerPx();
+    _hit.sub(_V3.copy(SIM_C).applyQuaternion(SIM_Q_INV)); // 공간 중심 기준
     mouse.x = _hit.x * k + dims[0] / 2;
     mouse.y = _hit.y * k + dims[1] / 2;
     mouse.z = _hit.z * k + dims[2] / 2;
@@ -638,7 +679,7 @@ function updateInstances(dt) {
     quat[i].slerp(_q, rotK);
 
     const lx = (P[i3] - hx) * wpp, ly = (P[i3 + 1] - hy) * wpp, lz = (P[i3 + 2] - hz) * wpp;
-    _p.set(rx(lx, ly, lz), ry(lx, ly, lz), rz(lx, ly, lz));
+    _p.set(rx(lx, ly, lz) + SIM_C.x, ry(lx, ly, lz) + SIM_C.y, rz(lx, ly, lz) + SIM_C.z);
     _m.compose(_p, quat[i], _s);
     _m.toArray(arr, i * 16);
 
@@ -857,6 +898,7 @@ addEventListener('resize', () => {
 let simT = 0;
 function frame(dt) {
   simT += dt;
+  checkCamera();
   updateMouse();
   updateChoreo(dt);
   stepBoids(Math.min(dt * 60, 2)); // 원본 ticker delta (60fps = 1, 최대 2)
