@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Spread Wing</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; }
+  body.hide-ui .lil-gui, body.hide-ui #hint { display: none !important; }
+  #hint {
+    position: fixed; left: 12px; bottom: 10px;
+    font: 11px/1.4 -apple-system, BlinkMacSystemFont, sans-serif;
+    color: rgba(255,255,255,.35); user-select: none; pointer-events: none;
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="hint">H: UI 숨기기 · F: 전체 화면 · 드래그: 회전 · 휠: 줌</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import GUI from 'three/addons/libs/lil-gui.module.min.js';
+
+// ---- 파라미터 ---------------------------------------------------------
+const params = {
+  maxAngle: 55,      // 최대 접힘 각도 (deg). 0 = 완전히 펼침, +위 / -아래
+  frequency: 1.1,    // 날갯짓 빈도 (Hz)
+  upDownBias: 0.15,  // 위/아래 비대칭 (0 = 대칭)
+  scale: 1.0,        // 스프레드 크기
+  light: 1.0,        // 조명 강도
+  background: '#000000',
+};
+
+// ---- 렌더러 / 장면 / 카메라 ------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(params.background);
+
+const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.01, 200);
+camera.position.set(3.2, 3.4, 4.6);          // 위에서 비스듬히 내려다봄
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+
+// ---- 조명: 무광 종이의 명암이 드러나도록 ---------------------------
+const hemi = new THREE.HemisphereLight(0xffffff, 0x222222, 0.6);
+const key = new THREE.DirectionalLight(0xffffff, 2.2);
+key.position.set(2, 5, 1.5);
+const fill = new THREE.DirectionalLight(0xffffff, 0.35);
+fill.position.set(-3, -1, -2);
+scene.add(hemi, key, fill);
+function applyLight() {
+  hemi.intensity = 0.6 * params.light;
+  key.intensity = 2.2 * params.light;
+  fill.intensity = 0.35 * params.light;
+}
+
+// ---- 스프레드 지오메트리 ---------------------------------------------
+// 한 페이지 140 × 220 mm → 단위: 1 = 100 mm. 펼침 280 × 220.
+// 접지선(spine)은 Z축 위(x = 0), 진행 방향과 평행.
+// 왼쪽 페이지 x∈[-1.4,0], 오른쪽 페이지 x∈[0,1.4], z∈[-1.1,1.1]
+const PW = 1.4, PH = 2.2;
+function makeSpreadGeometry() {
+  const pos = [], uv = [], side = [], idx = [];
+  const quad = (x0, x1, u0, u1, s) => {
+    const b = pos.length / 3;
+    // 이미지 위쪽(v=1) = 진행 방향(-Z)
+    pos.push(x0, 0, -PH / 2,  x1, 0, -PH / 2,  x1, 0, PH / 2,  x0, 0, PH / 2);
+    uv.push(u0, 1,  u1, 1,  u1, 0,  u0, 0);
+    side.push(s, s, s, s);
+    idx.push(b, b + 2, b + 1,  b, b + 3, b + 2); // 윗면(+Y)이 앞면
+  };
+  quad(-PW, 0, 0.0, 0.5, -1); // 왼쪽 페이지 ← 이미지 왼쪽 절반
+  quad(0, PW, 0.5, 1.0, 1);   // 오른쪽 페이지 ← 이미지 오른쪽 절반
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setAttribute('aSide', new THREE.Float32BufferAttribute(side, 1));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 2.0);
+  return g;
+}
+
+// ---- 머티리얼: 버텍스 셰이더에서 강체 회전 ---------------------------
+// 각 페이지는 접지선을 축으로 θ만큼 강체 회전한다 (휘거나 늘어나지 않음).
+//   x' = x·cosθ,  y' = |x|·sinθ
+//   n' = (-side·sinθ, cosθ, 0)
+const uniforms = { uAngle: { value: 0 } };
+const material = new THREE.MeshStandardMaterial({
+  color: 0xffffff,
+  roughness: 1.0,
+  metalness: 0.0,
+  side: THREE.DoubleSide,
+});
+material.onBeforeCompile = (shader) => {
+  shader.uniforms.uAngle = uniforms.uAngle;
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', `#include <common>
+      attribute float aSide;
+      uniform float uAngle;`)
+    .replace('#include <beginnormal_vertex>', `
+      float cA = cos(uAngle), sA = sin(uAngle);
+      vec3 objectNormal = vec3(-aSide * sA, cA, 0.0);
+      #ifdef USE_TANGENT
+        vec3 objectTangent = vec3(tangent.xyz);
+      #endif`)
+    .replace('#include <begin_vertex>', `
+      vec3 transformed = vec3(position.x * cA, abs(position.x) * sA, position.z);`);
+};
+
+const spread = new THREE.Mesh(makeSpreadGeometry(), material);
+scene.add(spread);
+
+// ---- 날갯짓 -----------------------------------------------------------
+// 위상 φ에 대해 θ = A·(sin φ + b·sin 2φ)/norm  — 약간의 비대칭으로 생물적인 느낌
+let phase = 0;
+function flapAngle(p) {
+  const b = params.upDownBias;
+  const raw = Math.sin(p) + b * Math.sin(2 * p);
+  const norm = 1 + b * 0.6; // 대략적인 최대값 보정
+  return THREE.MathUtils.degToRad(params.maxAngle) * raw / norm;
+}
+
+// ---- GUI --------------------------------------------------------------
+const gui = new GUI({ title: 'Spread Wing' });
+const fw = gui.addFolder('날갯짓');
+fw.add(params, 'maxAngle', 0, 85, 1).name('최대 접힘 각도 (°)');
+fw.add(params, 'frequency', 0, 4, 0.01).name('날갯짓 빈도 (Hz)');
+fw.add(params, 'upDownBias', 0, 0.5, 0.01).name('위/아래 비대칭');
+const fv = gui.addFolder('시각 요소');
+fv.add(params, 'scale', 0.3, 3, 0.01).name('스프레드 크기').onChange(v => spread.scale.setScalar(v));
+fv.add(params, 'light', 0, 2, 0.01).name('조명 강도').onChange(applyLight);
+fv.addColor(params, 'background').name('배경색').onChange(v => scene.background.set(v));
+fv.add(camera, 'fov', 10, 90, 1).name('카메라 원근감 (FOV)').onChange(() => camera.updateProjectionMatrix());
+fv.add({ reset() { camera.position.set(3.2, 3.4, 4.6); controls.target.set(0, 0, 0); } }, 'reset').name('카메라 초기화');
+
+// ---- 키 / 리사이즈 ---------------------------------------------------
+addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'h' || e.key === 'H') document.body.classList.toggle('hide-ui');
+  if (e.key === 'f' || e.key === 'F') {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+    else document.exitFullscreen?.();
+  }
+});
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---- 루프 -------------------------------------------------------------
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  phase = (phase + dt * params.frequency * Math.PI * 2) % (Math.PI * 2);
+  uniforms.uAngle.value = flapAngle(phase);
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
