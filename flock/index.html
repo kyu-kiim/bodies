@@ -61,7 +61,8 @@ const params = {
   noise: 0.5,
   accuracyPower: 5,    // 이웃 표본 수 = 2^p (10 = 전부)
   bounce: false,       // 경계: false = 반대편으로 이어짐(원본 기본), true = 튕김
-  space: 1.0,          // 활동 공간 크기 배율 (기본 360 × 200 × 280 px)
+  space: 1.0,          // 활동 공간 크기 (1 = 카메라 화면 전체)
+  spacing: 2.0,        // 개체 간격: 시뮬레이션 1px을 3D에서 얼마나 길게 그릴지 (클수록 서로 멀리 보임)
   mouseFollow: true,   // 마우스를 향해 끌림 (원본: 왼쪽 버튼 = 끌기, 오른쪽 = 밀기)
   // 날갯짓
   maxAngle: 55,
@@ -71,7 +72,7 @@ const params = {
   sync: 0.15,          // 동기화 정도
   upDownBias: 0.15,
   // 시각
-  scale: 1.0,
+  scale: 0.55,         // 스프레드 크기 (1 = 280 × 220mm 실제 비율 기준 크기)
   light: 1.0,
   background: '#000000',
 };
@@ -204,10 +205,40 @@ scene.add(mesh);
 //   interact(): 마우스 끌기/밀기, 더블클릭 폭발
 // Δ = 60fps 기준 프레임 수 (원본 PIXI ticker delta, 최대 2)
 // =====================================================================
-const PX = 0.1;                         // 1px → 0.1 world unit
-const BASE_DIMS = [360, 200, 280];      // 활동 공간 (px)
+// ---- 활동 공간 = 화면 (원본처럼) ---------------------------------------
+// 시뮬레이션 공간의 x·y축을 기본 카메라 화면의 가로·세로에, z축을 깊이에 맞춘다.
+// 크기는 카메라에서 보이는 영역(공간 중간보다 조금 먼 깊이 기준)에 맞춰 계산 → 군집이 화면 전체를
+// 돌아다니고, 반대편으로 이어지는 지점(경계)은 화면 밖에 놓인다.
+// 1px이 3D에서 차지하는 길이 = PX × 개체 간격(spacing)
+const PX = 0.1;
+const SIM_Q = (() => {
+  const c = new THREE.PerspectiveCamera();
+  c.position.copy(DEFAULT_CAM);
+  c.lookAt(0, 0, 0);
+  return c.quaternion.clone();
+})();
+const SIM_Q_INV = SIM_Q.clone().invert();
+const SIM_M = new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(SIM_Q)).elements; // 열 우선
 const dims = [0, 0, 0];
-function updateDims() { for (let k = 0; k < 3; k++) dims[k] = BASE_DIMS[k] * params.space; }
+const worldPerPx = () => PX * params.spacing;
+function updateDims() {
+  const L = DEFAULT_CAM.length();
+  const depthW = L * 0.5 * params.space;                        // 공간의 깊이 (world)
+  const far = L + depthW * 0.15;            // 중간보다 조금 먼 깊이의 화면 크기에 맞춤
+  const halfH = far * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * params.space;
+  const halfW = halfH * (innerWidth / innerHeight);
+  const margin = 1.6 * params.scale;                             // 스프레드가 화면 밖에서 넘어가도록
+  const k = 1 / worldPerPx();
+  dims[0] = (2 * halfW + 2 * margin) * k;
+  dims[1] = (2 * halfH + 2 * margin) * k;
+  dims[2] = depthW * k;
+}
+// 공간 크기가 바뀌면 위치를 비율대로 옮겨 군집이 끊기지 않게 함
+function rescaleSpace() {
+  const old = dims.slice();
+  updateDims();
+  for (let i = 0; i < MAX; i++) for (let k = 0; k < 3; k++) P[i * 3 + k] *= dims[k] / (old[k] || dims[k]);
+}
 updateDims();
 
 const P = new Float64Array(MAX * 3);    // 위치 (px, 0..dims)
@@ -297,9 +328,11 @@ function updateMouse() {
   plane.setFromNormalAndCoplanarPoint(_camDir, controls.target);
   raycaster.setFromCamera(ndc, camera);
   if (raycaster.ray.intersectPlane(plane, _hit)) {
-    mouse.x = _hit.x / PX + dims[0] / 2;
-    mouse.y = _hit.y / PX + dims[1] / 2;
-    mouse.z = _hit.z / PX + dims[2] / 2;
+    _hit.applyQuaternion(SIM_Q_INV); // world → 시뮬레이션 축
+    const k = 1 / worldPerPx();
+    mouse.x = _hit.x * k + dims[0] / 2;
+    mouse.y = _hit.y * k + dims[1] / 2;
+    mouse.z = _hit.z * k + dims[2] / 2;
   }
 }
 
@@ -496,12 +529,20 @@ function updateInstances(dt) {
   const mf = Math.max(params.maxForce, 1e-3);
   _s.setScalar(params.scale);
 
+  const M = SIM_M, wpp = worldPerPx();
+  // 시뮬레이션 축 → world 회전
+  const rx = (x, y, z) => M[0] * x + M[3] * y + M[6] * z;
+  const ry = (x, y, z) => M[1] * x + M[4] * y + M[7] * z;
+  const rz = (x, y, z) => M[2] * x + M[5] * y + M[8] * z;
+
   for (let i = 0; i < n; i++) {
     const i3 = i * 3;
-    const vx = V[i3], vy = V[i3 + 1], vz = V[i3 + 2];
+    const sx = V[i3], sy = V[i3 + 1], sz = V[i3 + 2];
+    const vx = rx(sx, sy, sz), vy = ry(sx, sy, sz), vz = rz(sx, sy, sz);
     const sp = Math.hypot(vx, vy, vz) || 1;
-    const fx = vx / sp, fy = vy / sp, fz = vz / sp;          // 진행 방향
-    const ax = ACC[i3], ay = ACC[i3 + 1], az = ACC[i3 + 2];  // px/frame²
+    const fx = vx / sp, fy = vy / sp, fz = vz / sp;          // 진행 방향 (world)
+    const qx = ACC[i3], qy = ACC[i3 + 1], qz = ACC[i3 + 2];  // px/frame²
+    const ax = rx(qx, qy, qz), ay = ry(qx, qy, qz), az = rz(qx, qy, qz);
 
     // 로컬 축: z = −진행방향, x = 오른쪽 페이지, y = 앞면 법선
     _z.set(-fx, -fy, -fz);
@@ -520,7 +561,8 @@ function updateInstances(dt) {
     _q.setFromRotationMatrix(_m);
     quat[i].slerp(_q, rotK);
 
-    _p.set((P[i3] - hx) * PX, (P[i3 + 1] - hy) * PX, (P[i3 + 2] - hz) * PX);
+    const lx = (P[i3] - hx) * wpp, ly = (P[i3 + 1] - hy) * wpp, lz = (P[i3 + 2] - hz) * wpp;
+    _p.set(rx(lx, ly, lz), ry(lx, ly, lz), rz(lx, ly, lz));
     _m.compose(_p, quat[i], _s);
     _m.toArray(arr, i * 16);
 
@@ -655,6 +697,10 @@ function toast(msg, isError = false) {
 // GUI
 // =====================================================================
 const gui = new GUI({ title: 'Spread Flock' });
+const fS = gui.addFolder('크기 · 간격');
+fS.add(params, 'scale', 0.1, 2, 0.01).name('스프레드 크기').onChange(rescaleSpace);
+fS.add(params, 'spacing', 0.5, 5, 0.01).name('개체 간격').onChange(rescaleSpace);
+
 const fF = gui.addFolder('군집 (기존 bodies 모델)');
 fF.add(params, 'count', 1, MAX, 1).name('개체 수').onChange((v) => {
   for (let i = mesh.count; i < v; i++) resetBoid(i); // 새로 생긴 개체는 원본처럼 임의 위치에서 시작
@@ -671,10 +717,7 @@ fF.add(params, 'vision', 10, 200, 1).name('주변 인식 반경 (vision)');
 fF.add(params, 'drag', 0, 0.1, 0.001).name('감쇠 (drag)');
 fF.add(params, 'noise', 0, 5, 0.01).name('노이즈 (noise)');
 fF.add(params, 'accuracyPower', 0, 10, 1).name('이웃 표본 2^n (10=전부)');
-fF.add(params, 'space', 0.5, 3, 0.01).name('활동 공간 크기').onChange(() => {
-  const old = dims.slice(); updateDims();
-  for (let i = 0; i < MAX; i++) for (let k = 0; k < 3; k++) P[i * 3 + k] *= dims[k] / old[k];
-});
+fF.add(params, 'space', 0.3, 2, 0.01).name('활동 공간 크기 (1 = 화면)').onChange(rescaleSpace);
 fF.add(params, 'bounce').name('경계에서 튕김 (끄면 반대편으로)');
 fF.add(params, 'mouseFollow').name('마우스 따라가기');
 fF.add({ f() { for (let i = 0; i < MAX; i++) resetBoid(i); } }, 'f').name('다시 흩뿌리기');
@@ -701,10 +744,9 @@ fT.add({ more: false }, 'more').name('D–F 타입 보기').onChange((v) => {
 });
 
 const fV = gui.addFolder('시각 요소');
-fV.add(params, 'scale', 0.2, 4, 0.01).name('스프레드 크기');
 fV.add(params, 'light', 0, 2, 0.01).name('조명 강도').onChange(applyLight);
 fV.addColor(params, 'background').name('배경색').onChange((v) => scene.background.set(v));
-fV.add(camera, 'fov', 10, 100, 1).name('카메라 원근감 (FOV)').onChange(() => camera.updateProjectionMatrix());
+fV.add(camera, 'fov', 10, 100, 1).name('카메라 원근감 (FOV)').onChange(() => { camera.updateProjectionMatrix(); rescaleSpace(); });
 fV.add({ f() { camera.position.copy(DEFAULT_CAM); controls.target.set(0, 0, 0); } }, 'f').name('카메라 초기화');
 fV.close();
 
@@ -723,6 +765,7 @@ addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  rescaleSpace(); // 창 크기가 바뀌면 활동 공간도 화면에 맞춤
 });
 
 let simT = 0;
